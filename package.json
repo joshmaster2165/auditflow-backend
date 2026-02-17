@@ -1,0 +1,26 @@
+{
+  "name": "auditflow-backend",
+  "version": "1.0.0",
+  "description": "AuditFlow AI Analysis Engine - Compliance audit backend powered by GPT-4",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "latest",
+    "axios": "latest",
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "mammoth": "latest",
+    "openai": "latest",
+    "pdf-parse": "latest"
+  },
+  "devDependencies": {
+    "nodemon": "latest"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
