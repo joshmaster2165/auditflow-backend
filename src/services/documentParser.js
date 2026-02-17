@@ -1,7 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const pdfParseModule = require('pdf-parse');
-const pdfParse = pdfParseModule.default || pdfParseModule;
+const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 
 const SUPPORTED_TYPES = {

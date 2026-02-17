@@ -15,7 +15,7 @@
     "express": "latest",
     "mammoth": "latest",
     "openai": "latest",
-    "pdf-parse": "latest"
+    "pdf-parse": "^1.1.1"
   },
   "devDependencies": {
     "nodemon": "latest"
