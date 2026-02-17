@@ -123,27 +123,32 @@ async function analyzeEvidence(documentText, requirementText, controlName) {
 // Framework Extraction — extract controls from PDF documents
 // ─────────────────────────────────────────────────────────────
 
-const FRAMEWORK_EXTRACTION_PROMPT = `You are an expert compliance framework analyst. Your task is to extract structured compliance controls from a document.
+const FRAMEWORK_EXTRACTION_PROMPT = `You are an expert compliance framework analyst. Your task is to intelligently analyze a document and extract structured compliance controls.
 
-You will receive the text content of a compliance framework document (e.g., PCI DSS, SOC 2, ISO 27001, NIST 800-53, HIPAA, CIS Controls, GDPR, etc.).
+You will receive text content from a compliance-related document. It could be a formal framework (PCI DSS, SOC 2, ISO 27001, NIST 800-53, HIPAA, CIS Controls, GDPR), an internal policy document, a security checklist, audit requirements, regulatory guidance, or any other compliance-related content.
 
-Your job is to identify and extract every individual control, requirement, or security measure from the document and return them as structured JSON.
+Your approach:
+1. FIRST, analyze the document to understand its structure — is it a formal numbered framework, a policy document with sections, a checklist, a table of requirements, or something else?
+2. THEN, decide the best extraction strategy for this specific document
+3. Extract every actionable control, requirement, or compliance measure you can identify
 
-Rules for extraction:
-1. Each control MUST have a control_number (the official identifier like "1.1", "AC-1", "A.5.1", etc.)
-2. Each control MUST have a title (brief name of the control)
-3. Each control SHOULD have a description (detailed requirement text)
-4. Each control SHOULD have a category (domain/family/section it belongs to)
-5. Preserve the official numbering scheme from the document
-6. Maintain hierarchical relationships where applicable (parent controls vs sub-controls)
-7. Do NOT invent or fabricate controls that are not in the document
-8. If a section contains multiple sub-requirements under one heading, extract each as a separate control
-9. For category, use the section or domain heading the control falls under
+Flexible extraction rules:
+- If the document has official control numbers (e.g., "1.1", "AC-1", "A.5.1"), use them exactly
+- If the document does NOT have explicit control numbers, GENERATE meaningful IDs based on the content (e.g., "SEC-1", "POL-2.1", "REQ-A1" — use a prefix that reflects the document type)
+- Every control needs a title — if a control only has a long description, create a concise title summarizing it
+- Preserve the document's natural grouping — sections, chapters, domains, families, categories — whatever the document uses
+- Detect and preserve hierarchy — parent/child relationships based on numbering, indentation, or section nesting
+- Do NOT fabricate requirements that aren't in the document, but DO ensure every requirement is captured even if it requires generating an ID or title
+
+You must also analyze the document structure and recommend how controls should be displayed:
+- "tree" — if the document has clear parent-child hierarchies (e.g., numbered sections with subsections)
+- "grouped" — if controls naturally fall into categories/domains but without deep nesting
+- "flat" — if controls are a simple list without meaningful grouping
 
 You must respond with valid JSON only. Do not include any text outside the JSON object.`;
 
 function buildFrameworkExtractionPrompt(documentText, context) {
-  let prompt = `Extract all compliance controls from the following framework document.`;
+  let prompt = `Analyze and extract all compliance controls from the following document.`;
 
   if (context?.frameworkName) {
     prompt += `\n\nFramework name (provided by user): ${context.frameworkName}`;
@@ -158,27 +163,42 @@ function buildFrameworkExtractionPrompt(documentText, context) {
   prompt += `\n\n## Document Content:\n${documentText}`;
 
   prompt += `\n\n## Instructions:
-Return a JSON object with this exact structure:
+
+First, analyze this document's structure. Then extract all controls/requirements and return a JSON object with this structure:
 
 {
-  "framework_detected": "<name of framework detected from content, or null>",
+  "framework_detected": "<name of framework detected, or null>",
   "version_detected": "<version detected, or null>",
-  "total_controls_found": <number>,
-  "categories_found": ["<category1>", "<category2>"],
-  "controls": [
+  "suggested_layout": "tree" | "grouped" | "flat",
+  "suggested_grouping_field": "<what concept groups these controls — e.g. 'domain', 'section', 'category', 'chapter', 'family'>",
+  "groups": [
     {
-      "control_number": "<official identifier, e.g. '1.1.1', 'AC-1', 'A.5.1.1'>",
-      "title": "<brief control name/title>",
-      "description": "<full requirement description text>",
-      "category": "<domain/family/section name>",
-      "parent_control_number": "<parent control number if this is a sub-control, or null>",
-      "level": <0 for top-level, 1 for sub-control, 2 for sub-sub-control, etc.>
+      "name": "<group/category/domain name>",
+      "description": "<brief description of what this group covers, or null>",
+      "sort_order": <number for display ordering>
     }
   ],
-  "extraction_notes": "<any important notes about the extraction, ambiguities, or limitations>"
+  "controls": [
+    {
+      "control_number": "<official ID from document, or generate a meaningful one like 'SEC-1', 'POL-2.1'>",
+      "title": "<concise control name>",
+      "description": "<full requirement text>",
+      "group": "<which group from the groups array this belongs to>",
+      "parent_control_number": "<parent control's number if hierarchical, or null>",
+      "level": <0 for top-level, 1 for sub-control, 2 for sub-sub, etc.>,
+      "sort_order": <number for natural reading order>
+    }
+  ],
+  "extraction_notes": "<notes about your extraction approach, any ambiguities, or what you generated vs found in the document>"
 }
 
-Extract ALL controls you can find. Be thorough and preserve the document's structure.`;
+Key guidance:
+- Generate control_number IDs if the document doesn't have them — use a prefix that fits the document (SEC-, POL-, REQ-, CHK-, etc.)
+- Create concise titles even if the document only has long descriptions
+- Identify the natural grouping in the document and populate the "groups" array
+- Set suggested_layout to "tree" if there's clear hierarchy, "grouped" if there are categories but flat within them, "flat" if it's a simple list
+- Every control must belong to a group. If ungrouped, create a "General" group.
+- Be thorough — extract ALL requirements, don't skip any.`;
 
   return prompt;
 }
@@ -219,16 +239,42 @@ async function extractFrameworkControls(documentText, context = {}) {
       throw new Error('GPT response missing controls array');
     }
 
-    // Filter out controls missing required fields
-    result.controls = result.controls.filter((control) => {
-      if (!control.control_number || !control.title) {
-        console.warn(`⚠️ Skipping control missing required fields: ${JSON.stringify(control).substring(0, 100)}`);
-        return false;
-      }
-      return true;
-    });
+    // Backfill missing fields instead of dropping controls
+    let autoIdCounter = 1;
+    result.controls = result.controls
+      .filter((control) => {
+        // Only drop if completely empty (no title AND no description)
+        if (!control.title && !control.description) {
+          console.warn(`⚠️ Dropping empty control: ${JSON.stringify(control).substring(0, 100)}`);
+          return false;
+        }
+        return true;
+      })
+      .map((control) => {
+        // Generate control_number if missing
+        if (!control.control_number) {
+          control.control_number = `CTRL-${String(autoIdCounter++).padStart(3, '0')}`;
+          console.log(`📝 Generated ID ${control.control_number} for: "${(control.title || control.description || '').substring(0, 50)}"`);
+        }
+        // Generate title from description if missing
+        if (!control.title && control.description) {
+          control.title = control.description.substring(0, 80) + (control.description.length > 80 ? '...' : '');
+        }
+        // Ensure all fields exist with defaults
+        control.description = control.description || null;
+        control.group = control.group || control.category || null;
+        control.parent_control_number = control.parent_control_number || null;
+        control.level = control.level || 0;
+        control.sort_order = control.sort_order || 0;
+        return control;
+      });
 
-    console.log(`✅ Extracted ${result.controls.length} controls from framework`);
+    // Ensure suggested_layout and groups exist with defaults
+    result.suggested_layout = result.suggested_layout || 'grouped';
+    result.suggested_grouping_field = result.suggested_grouping_field || 'category';
+    result.groups = result.groups || [];
+
+    console.log(`✅ Extracted ${result.controls.length} controls (layout: ${result.suggested_layout}, groups: ${result.groups.length})`);
 
     return {
       result,
@@ -254,15 +300,17 @@ async function extractFrameworkControls(documentText, context = {}) {
 
 const FRAMEWORK_ENHANCE_PROMPT = `You are an expert compliance framework analyst. Your task is to enhance and improve structured control data that has been extracted from a compliance framework document.
 
-You will receive an array of controls (each with control_number, title, description, category fields) and optional context.
+You will receive an array of controls (each with control_number, title, description, group fields) and optional context.
 
 Your enhancements should:
-1. Suggest categories where they are missing (based on control content and common framework structures)
-2. Standardize control number formatting (e.g., consistent dot notation)
-3. Generate concise descriptions where missing (based on the title and category context)
-4. Suggest parent-child hierarchy based on control numbering patterns (e.g., 1.1 is parent of 1.1.1)
-5. Do NOT change content that already looks correct
-6. Do NOT invent new controls — only enhance existing ones
+1. Suggest groups/categories where they are missing (based on control content and common framework structures)
+2. Standardize control number formatting for consistency
+3. Generate concise descriptions where missing (based on the title and group context)
+4. Infer parent-child hierarchy based on numbering patterns, naming conventions, or content relationships
+5. Suggest the best display layout: "tree" if clear hierarchy, "grouped" if categories without nesting, "flat" if simple list
+6. Standardize group names for consistency (e.g., don't have "Access Control" and "Access Controls" as separate groups)
+7. Do NOT change content that already looks correct
+8. Do NOT invent new controls — only enhance existing ones
 
 You must respond with valid JSON only.`;
 
@@ -280,14 +328,17 @@ function buildEnhancePrompt(controls, context) {
 
   prompt += `\n\n## Return JSON with this structure:
 {
+  "suggested_layout": "tree" | "grouped" | "flat",
+  "suggested_grouping_field": "<best grouping concept — e.g. 'domain', 'category', 'section'>",
   "controls": [
     {
       "control_number": "<standardized>",
       "title": "<original or improved>",
       "description": "<original or generated if missing>",
-      "category": "<original or suggested if missing>",
+      "group": "<original or suggested if missing>",
       "parent_control_number": "<inferred parent or null>",
       "level": <inferred hierarchy level>,
+      "sort_order": <recommended display order>,
       "changes_made": ["<description of each change made>"]
     }
   ],

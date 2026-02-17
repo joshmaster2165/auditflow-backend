@@ -51,12 +51,15 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       };
 
       let allControls = [];
+      let allGroups = [];
       let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
       let chunked = false;
       let chunkCount = 1;
       let frameworkDetected = null;
       let versionDetected = null;
       let extractionNotes = null;
+      let suggestedLayout = 'grouped';
+      let suggestedGroupingField = 'category';
 
       if (needsChunking(parsed.text)) {
         chunked = true;
@@ -77,6 +80,18 @@ router.post('/parse', upload.single('file'), async (req, res) => {
           if (i === 0) {
             frameworkDetected = extraction.result.framework_detected || null;
             versionDetected = extraction.result.version_detected || null;
+            suggestedLayout = extraction.result.suggested_layout || 'grouped';
+            suggestedGroupingField = extraction.result.suggested_grouping_field || 'category';
+            allGroups = extraction.result.groups || [];
+          } else {
+            // Merge groups from subsequent chunks
+            const existingGroupNames = new Set(allGroups.map((g) => g.name));
+            (extraction.result.groups || []).forEach((g) => {
+              if (!existingGroupNames.has(g.name)) {
+                allGroups.push(g);
+                existingGroupNames.add(g.name);
+              }
+            });
           }
 
           totalUsage.prompt_tokens += extraction.usage?.prompt_tokens || 0;
@@ -96,15 +111,24 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       } else {
         const extraction = await extractFrameworkControls(parsed.text, context);
         allControls = extraction.result.controls;
+        allGroups = extraction.result.groups || [];
         frameworkDetected = extraction.result.framework_detected || null;
         versionDetected = extraction.result.version_detected || null;
         extractionNotes = extraction.result.extraction_notes || null;
+        suggestedLayout = extraction.result.suggested_layout || 'grouped';
+        suggestedGroupingField = extraction.result.suggested_grouping_field || 'category';
         totalUsage = extraction.usage || totalUsage;
       }
 
+      // Normalize: map "group" field to "category" for frontend consistency
+      allControls = allControls.map((c) => ({
+        ...c,
+        category: c.group || c.category || null,
+      }));
+
       const categoriesFound = [...new Set(allControls.map((c) => c.category).filter(Boolean))];
 
-      console.log(`✅ Framework extraction complete: ${allControls.length} controls, ${categoriesFound.length} categories`);
+      console.log(`✅ Framework extraction complete: ${allControls.length} controls, ${categoriesFound.length} categories, layout: ${suggestedLayout}`);
 
       return res.json({
         success: true,
@@ -112,6 +136,9 @@ router.post('/parse', upload.single('file'), async (req, res) => {
         fileName,
         data: {
           controls: allControls,
+          groups: allGroups,
+          suggestedLayout,
+          suggestedGroupingField,
           frameworkDetected,
           versionDetected,
           totalControls: allControls.length,
@@ -204,10 +231,16 @@ router.post('/enhance', async (req, res) => {
 
     console.log(`✅ Enhancement complete: ${allEnhanced.length} controls enhanced`);
 
+    // Normalize: map "group" field to "category" for frontend consistency
+    const normalizedControls = allEnhanced.map((c) => ({
+      ...c,
+      category: c.group || c.category || null,
+    }));
+
     return res.json({
       success: true,
       data: {
-        controls: allEnhanced,
+        controls: normalizedControls,
         summary: totalSummary,
         metadata: {
           model: 'gpt-4-turbo-preview',
