@@ -8,15 +8,9 @@ const { testConnection } = require('./utils/supabase');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS configuration
-const allowedOrigins = [
-  process.env.FRONTEND_URL,
-  'http://localhost:8080',
-  'http://localhost:5173',
-].filter(Boolean);
-
+// CORS configuration - allow all origins for public API
 app.use(cors({
-  origin: allowedOrigins.length > 0 ? allowedOrigins : '*',
+  origin: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true,
 }));
