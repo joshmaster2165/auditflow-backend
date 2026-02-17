@@ -31,7 +31,7 @@ router.post('/evidence/:evidenceId', async (req, res) => {
       return res.status(404).json({ error: 'Evidence record not found', details: evidenceError?.message });
     }
 
-    console.log(`📋 Evidence: ${evidence.file_name || evidence.name || 'unnamed'}`);
+    console.log(`📋 Evidence: ${evidence.file_name || 'unnamed'}`);
 
     // 2. Download file from storage
     const filePath = evidence.file_path || evidence.storage_path;
@@ -52,7 +52,7 @@ router.post('/evidence/:evidenceId', async (req, res) => {
       control?.description ||
       'No specific requirement text provided';
 
-    const controlName = control?.name || control?.title || 'Unknown Control';
+    const controlName = control?.title || 'Unknown Control';
 
     console.log(`📐 Control: ${controlName}`);
     console.log(`📝 Requirement: ${requirementText.substring(0, 100)}...`);
@@ -100,7 +100,7 @@ router.post('/evidence/:evidenceId', async (req, res) => {
         analysis: gptResult.analysis,
         diff_data: diffData,
         control: { id: control?.id, name: controlName },
-        evidence: { id: evidenceId, name: evidence.file_name || evidence.name },
+        evidence: { id: evidenceId, name: evidence.file_name },
       });
     }
 
@@ -119,7 +119,7 @@ router.post('/evidence/:evidenceId', async (req, res) => {
       },
       evidence: {
         id: evidenceId,
-        name: evidence.file_name || evidence.name,
+        name: evidence.file_name,
       },
       metadata: {
         model: gptResult.model,
@@ -148,8 +148,8 @@ router.get('/results/:evidenceId', async (req, res) => {
       .from('analysis_results')
       .select(`
         *,
-        evidence:evidence_id (id, file_name, name, file_type, created_at),
-        controls:control_id (id, name, title, description)
+        evidence:evidence_id (id, file_name, file_type, created_at),
+        controls:control_id (id, title, description)
       `)
       .eq('evidence_id', evidenceId)
       .order('analyzed_at', { ascending: false })
@@ -179,8 +179,8 @@ router.get('/project/:projectId/results', async (req, res) => {
       .from('analysis_results')
       .select(`
         *,
-        evidence:evidence_id (id, file_name, name),
-        controls:control_id (id, name, title)
+        evidence:evidence_id (id, file_name),
+        controls:control_id (id, title)
       `)
       .eq('project_id', projectId)
       .order('analyzed_at', { ascending: false });
@@ -242,8 +242,8 @@ router.get('/export/:analysisId/html', async (req, res) => {
       .from('analysis_results')
       .select(`
         *,
-        evidence:evidence_id (id, file_name, name),
-        controls:control_id (id, name, title, frameworks:framework_id (name))
+        evidence:evidence_id (id, file_name),
+        controls:control_id (id, title, frameworks:framework_id (name))
       `)
       .eq('id', analysisId)
       .single();
@@ -253,9 +253,9 @@ router.get('/export/:analysisId/html', async (req, res) => {
     }
 
     const html = generateHtmlExport(analysis.diff_data, {
-      controlName: analysis.controls?.name || analysis.controls?.title,
+      controlName: analysis.controls?.title,
       frameworkName: analysis.controls?.frameworks?.name,
-      evidenceName: analysis.evidence?.file_name || analysis.evidence?.name,
+      evidenceName: analysis.evidence?.file_name,
       analyzedAt: analysis.analyzed_at,
     });
 
