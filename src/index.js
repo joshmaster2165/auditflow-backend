@@ -3,6 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const analyzeRoutes = require('./routes/analyze');
+const frameworkRoutes = require('./routes/framework');
 const { testConnection } = require('./utils/supabase');
 
 const app = express();
@@ -29,9 +30,18 @@ app.get('/health', (req, res) => {
 
 // Mount routes
 app.use('/api/analyze', analyzeRoutes);
+app.use('/api/framework', frameworkRoutes);
 
-// Global error handler
+// Global error handler (includes multer errors)
 app.use((err, req, res, next) => {
+  // Handle multer-specific errors
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ error: 'File too large. Maximum size is 20MB.' });
+  }
+  if (err.name === 'MulterError') {
+    return res.status(400).json({ error: `Upload error: ${err.message}` });
+  }
+
   console.error('💥 Unhandled error:', err.message);
   console.error(err.stack);
 
@@ -52,7 +62,8 @@ async function start() {
     console.log(`\n✅ Server running on http://localhost:${PORT}`);
     console.log(`📋 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-    console.log(`📡 API base: http://localhost:${PORT}/api/analyze\n`);
+    console.log(`📡 Analyze API: http://localhost:${PORT}/api/analyze`);
+    console.log(`📡 Framework API: http://localhost:${PORT}/api/framework\n`);
   });
 }
 
