@@ -300,6 +300,10 @@ async function extractFrameworkControls(documentText, context = {}) {
         if (!control.title && control.description) {
           control.title = control.description.substring(0, 80) + (control.description.length > 80 ? '...' : '');
         }
+        // Generate description from title if missing — critical for analysis pipeline
+        if (!control.description && control.title) {
+          control.description = `Compliance requirement: ${control.title}`;
+        }
         // Ensure all fields exist with defaults
         control.description = control.description || null;
         control.group = control.group || control.category || null;
@@ -480,6 +484,10 @@ async function extractControlsFromTabular(textData, context = {}) {
         }
         if (!control.title && control.description) {
           control.title = control.description.substring(0, 80) + (control.description.length > 80 ? '...' : '');
+        }
+        // Generate description from title if missing — critical for analysis pipeline
+        if (!control.description && control.title) {
+          control.description = `Compliance requirement: ${control.title}`;
         }
         control.description = control.description || null;
         control.group = control.group || control.category || null;

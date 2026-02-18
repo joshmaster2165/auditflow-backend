@@ -45,14 +45,18 @@ router.post('/evidence/:evidenceId', async (req, res) => {
     const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
     const documentText = await parseDocument(tempFilePath, mimeType);
 
-    // 4. Get requirement text
+    // 4. Get requirement text from control — use multiple fallbacks
     const control = evidence.controls;
+    const controlName = control?.title || 'Unknown Control';
     const requirementText =
       control?.custom_fields?.requirement_text ||
       control?.description ||
+      (control?.title ? `Verify compliance with: ${control.title}` : null) ||
       'No specific requirement text provided';
 
-    const controlName = control?.title || 'Unknown Control';
+    if (!control?.description && !control?.custom_fields?.requirement_text) {
+      console.warn(`⚠️ Control "${controlName}" has no description — using title as requirement fallback`);
+    }
 
     console.log(`📐 Control: ${controlName}`);
     console.log(`📝 Requirement: ${requirementText.substring(0, 100)}...`);
