@@ -11,7 +11,9 @@ router.post('/evidence/:evidenceId', async (req, res) => {
 
   try {
     const { evidenceId } = req.params;
+    const { controlContext } = req.body || {};
     console.log(`\n🔍 Starting analysis for evidence: ${evidenceId}`);
+    console.log(`🔎 controlContext from frontend: ${JSON.stringify(controlContext || null)}`);
 
     // 1. Fetch evidence record with joined controls and frameworks
     const { data: evidence, error: evidenceError } = await supabase
@@ -45,22 +47,58 @@ router.post('/evidence/:evidenceId', async (req, res) => {
     const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
     const documentText = await parseDocument(tempFilePath, mimeType);
 
-    // 4. Get requirement text from control — description is the PRIMARY requirement
-    const control = evidence.controls;
+    // 4. Get requirement text — prioritize frontend-provided context, fallback to DB join
+    const dbControl = evidence.controls;
+    console.log(`🔎 DB join control: ${JSON.stringify(dbControl, null, 2)?.substring(0, 500)}`);
 
-    // DEBUG: Log what we actually got from the Supabase join
-    console.log(`🔎 Control object: ${JSON.stringify(control, null, 2)?.substring(0, 500)}`);
+    // Merge: frontend body data takes priority over DB join
+    let control = {
+      title: controlContext?.title || dbControl?.title || null,
+      description: controlContext?.description || dbControl?.description || null,
+      control_number: controlContext?.control_number || dbControl?.control_number || '',
+      category: dbControl?.category || '',
+      id: dbControl?.id || null,
+      custom_fields: dbControl?.custom_fields || null,
+      frameworks: dbControl?.frameworks || null,
+    };
 
-    const controlName = control?.title || 'Unknown Control';
-    const controlNumber = control?.control_number || '';
-    const controlCategory = control?.category || '';
-    const frameworkName = control?.frameworks?.name || '';
+    console.log(`🔎 Control source: ${controlContext?.title ? 'frontend body' : (dbControl?.title ? 'DB join' : 'NONE')}`);
+
+    // Last-resort fallback: if both frontend and join are empty, query controls directly
+    if (!control.title && !control.description && evidence.control_id) {
+      console.warn(`⚠️ No control data from frontend or join — fetching control ${evidence.control_id} directly`);
+      const { data: fallbackControl, error: fallbackErr } = await supabase
+        .from('controls')
+        .select('*, frameworks:framework_id (*)')
+        .eq('id', evidence.control_id)
+        .single();
+
+      if (fallbackControl) {
+        console.log(`✅ Direct control fetch succeeded: "${fallbackControl.title}"`);
+        control = {
+          title: fallbackControl.title,
+          description: fallbackControl.description,
+          control_number: fallbackControl.control_number || '',
+          category: fallbackControl.category || '',
+          id: fallbackControl.id,
+          custom_fields: fallbackControl.custom_fields || null,
+          frameworks: fallbackControl.frameworks || null,
+        };
+      } else {
+        console.error(`❌ Direct control fetch failed: ${fallbackErr?.message}`);
+      }
+    }
+
+    const controlName = control.title || 'Unknown Control';
+    const controlNumber = control.control_number || '';
+    const controlCategory = control.category || '';
+    const frameworkName = control.frameworks?.name || '';
 
     // Description is the PRIMARY requirement — it contains the real compliance language
-    let requirementText = control?.description || control?.custom_fields?.requirement_text || null;
+    let requirementText = control.description || control.custom_fields?.requirement_text || null;
 
     // If no description, build a structured requirement from all available fields
-    if (!requirementText && control?.title) {
+    if (!requirementText && control.title) {
       console.warn(`⚠️ Control "${controlName}" has no description — building requirement from metadata`);
       const parts = [];
       if (frameworkName) parts.push(`Framework: ${frameworkName}`);
@@ -97,7 +135,7 @@ router.post('/evidence/:evidenceId', async (req, res) => {
     // 7. Store results in analysis_results table
     const analysisRecord = {
       evidence_id: evidenceId,
-      control_id: control?.id || null,
+      control_id: control.id || null,
       project_id: evidence.project_id || null,
       analyzed_at: new Date().toISOString(),
       analysis_version: 'v1.0',
@@ -130,7 +168,7 @@ router.post('/evidence/:evidenceId', async (req, res) => {
         warning: 'Analysis completed but failed to save to database',
         analysis: gptResult.analysis,
         diff_data: diffData,
-        control: { id: control?.id, name: controlName },
+        control: { id: control.id, name: controlName },
         evidence: { id: evidenceId, name: evidence.file_name },
       });
     }
@@ -144,9 +182,9 @@ router.post('/evidence/:evidenceId', async (req, res) => {
       analysis: gptResult.analysis,
       diff_data: diffData,
       control: {
-        id: control?.id,
+        id: control.id,
         name: controlName,
-        framework: control?.frameworks?.name || null,
+        framework: control.frameworks?.name || null,
       },
       evidence: {
         id: evidenceId,
