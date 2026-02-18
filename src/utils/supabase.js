@@ -18,10 +18,17 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey);
 async function testConnection() {
   try {
     console.log('🔌 Testing Supabase connection...');
-    const { data, error } = await supabase
+
+    // Add 10s timeout so this never hangs indefinitely
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Connection test timed out after 10s')), 10000)
+    );
+    const queryPromise = supabase
       .from('evidence')
       .select('id')
       .limit(1);
+
+    const { data, error } = await Promise.race([queryPromise, timeoutPromise]);
 
     if (error) {
       console.error('❌ Supabase connection test failed:', error.message);

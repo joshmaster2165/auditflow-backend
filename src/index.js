@@ -64,15 +64,18 @@ app.use((err, req, res, next) => {
 async function start() {
   console.log('\n🚀 AuditFlow Backend Starting...\n');
 
-  // Test Supabase connection
-  await testConnection();
-
+  // Start server FIRST so Railway can connect to the port immediately
   app.listen(PORT, () => {
     console.log(`\n✅ Server running on http://localhost:${PORT}`);
     console.log(`📋 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`🔗 Health check: http://localhost:${PORT}/health`);
     console.log(`📡 Analyze API: http://localhost:${PORT}/api/analyze`);
     console.log(`📡 Framework API: http://localhost:${PORT}/api/framework\n`);
+  });
+
+  // Test Supabase connection in background (non-blocking)
+  testConnection().catch(err => {
+    console.error('⚠️ Supabase connection test failed:', err.message);
   });
 }
 
