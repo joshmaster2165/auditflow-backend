@@ -78,9 +78,10 @@ async function run() {
           chunks[i] = null;
 
           // Extract only what we need, then free the extraction object
-          const controls = extraction.result.controls;
+          const controls = extraction.result.controls || [];
           const usage = extraction.usage;
-          allControls.push(...controls);
+          // Avoid spread operator — push one at a time to prevent "Invalid array length"
+          for (const c of controls) allControls.push(c);
 
           if (i === 0) {
             frameworkDetected = extraction.result.framework_detected || null;
@@ -162,9 +163,10 @@ async function run() {
           chunks[i] = null;
 
           // Extract only what we need
-          const controls = extraction.result.controls;
+          const controls = extraction.result.controls || [];
           const usage = extraction.usage;
-          allControls.push(...controls);
+          // Avoid spread operator — push one at a time to prevent "Invalid array length"
+          for (const c of controls) allControls.push(c);
 
           if (i === 0) {
             frameworkDetected = extraction.result.framework_detected || null;
