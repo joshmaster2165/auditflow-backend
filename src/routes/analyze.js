@@ -5,7 +5,7 @@ const { supabase, downloadFile, cleanupFile } = require('../utils/supabase');
 const { parseDocument } = require('../services/documentParser');
 const { analyzeEvidence } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
-const { buildRequirementText, computeGroupAggregate, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
+const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 
 // ── In-memory job store for async group analysis ──
 const jobs = new Map();
@@ -117,8 +117,11 @@ router.post('/evidence/:evidenceId', async (req, res) => {
     console.log(`🏛️ Framework: ${frameworkName || 'none'}`);
     console.log(`📝 Requirement (first 200 chars): ${requirementText.substring(0, 200)}...`);
 
-    // 5. Send to GPT for analysis
-    const gptResult = await analyzeEvidence(documentText, requirementText, controlName);
+    // 5. Fetch project-level custom instructions
+    const customInstructions = await fetchCustomInstructions(evidence.project_id);
+
+    // 6. Send to GPT for analysis
+    const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
 
     // 6. Generate diff visualization
     const diffData = generateDiff(gptResult.analysis, requirementText);

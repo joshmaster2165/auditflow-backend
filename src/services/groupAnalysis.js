@@ -4,6 +4,38 @@ const { analyzeEvidence } = require('./gpt');
 const { generateDiff } = require('./diffGenerator');
 
 /**
+ * Fetch custom_instructions for a project. Returns null if not found or empty.
+ *
+ * @param {string|null} projectId - UUID of the project
+ * @returns {string|null} Custom instructions text, or null
+ */
+async function fetchCustomInstructions(projectId) {
+  if (!projectId) return null;
+
+  try {
+    const { data, error } = await supabase
+      .from('projects')
+      .select('custom_instructions')
+      .eq('id', projectId)
+      .single();
+
+    if (error || !data) {
+      console.log(`📋 No custom instructions found for project ${projectId}`);
+      return null;
+    }
+
+    const instructions = data.custom_instructions?.trim() || null;
+    if (instructions) {
+      console.log(`📋 Loaded custom instructions for project ${projectId}: ${instructions.length} chars`);
+    }
+    return instructions;
+  } catch (err) {
+    console.warn(`⚠️ Failed to fetch custom instructions for project ${projectId}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
  * Build enriched requirement text from a control and its framework.
  * Extracted from analyze.js so both single-control and group analysis share the same logic.
  *
@@ -130,6 +162,9 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
 
     const framework = parentControl.frameworks || null;
 
+    // Fetch project-level custom instructions (once, before the loop)
+    const customInstructions = await fetchCustomInstructions(evidence.project_id);
+
     console.log(`📋 [Group ${jobId}] Parent: ${parentControl.control_number} - ${parentControl.title}`);
 
     // 3. Find all child controls under this parent
@@ -196,7 +231,7 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
         const requirementText = buildRequirementText(child, childFramework);
 
         // Call GPT analysis
-        const gptResult = await analyzeEvidence(documentText, requirementText, controlName);
+        const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
 
         // Generate diff visualization
         const diffData = generateDiff(gptResult.analysis, requirementText);
@@ -262,7 +297,7 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
 
           try {
             const requirementText = buildRequirementText(child, childFramework);
-            const gptResult = await analyzeEvidence(documentText, requirementText, controlName);
+            const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
             const diffData = generateDiff(gptResult.analysis, requirementText);
 
             const analysisRecord = {
@@ -401,6 +436,9 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
       throw new Error(`Evidence not found: ${evidenceError?.message || 'no data'}`);
     }
 
+    // Fetch project-level custom instructions (once, before the loop)
+    const customInstructions = await fetchCustomInstructions(evidence.project_id);
+
     // 2. Fetch the specified controls with their frameworks
     const { data: controls, error: controlsError } = await supabase
       .from('controls')
@@ -459,7 +497,7 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
 
       try {
         const requirementText = buildRequirementText(ctrl, ctrlFramework);
-        const gptResult = await analyzeEvidence(documentText, requirementText, controlName);
+        const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
         const diffData = generateDiff(gptResult.analysis, requirementText);
 
         const analysisRecord = {
@@ -521,7 +559,7 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
 
           try {
             const requirementText = buildRequirementText(ctrl, ctrlFramework);
-            const gptResult = await analyzeEvidence(documentText, requirementText, controlName);
+            const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
             const diffData = generateDiff(gptResult.analysis, requirementText);
 
             const analysisRecord = {
@@ -633,6 +671,7 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
 module.exports = {
   buildRequirementText,
   computeGroupAggregate,
+  fetchCustomInstructions,
   runGroupAnalysis,
   runGroupAnalysisByIds,
 };

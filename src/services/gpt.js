@@ -45,7 +45,7 @@ Your task is to analyze whether evidence documents satisfy specific compliance r
 
 You must respond with valid JSON only. Do not include any text outside the JSON object.`;
 
-function buildUserPrompt(documentText, requirementText, controlName) {
+function buildUserPrompt(documentText, requirementText, controlName, customInstructions) {
   return `Analyze the following evidence document against the compliance requirement.
 
 ## Control: ${controlName || 'Unnamed Control'}
@@ -55,7 +55,11 @@ ${requirementText}
 
 ## Evidence Document Content:
 ${documentText}
-
+${customInstructions ? `
+## Custom Analysis Instructions:
+The project owner has provided the following guidance for this analysis. Apply these instructions when evaluating the evidence:
+${customInstructions}
+` : ''}
 ## Instructions:
 Analyze the evidence against the requirement and return a JSON object with this exact structure:
 
@@ -89,16 +93,19 @@ Analyze the evidence against the requirement and return a JSON object with this 
 Break the requirement into 3-7 testable sub-requirements. Be precise about what evidence supports or contradicts each sub-requirement. Quote specific passages from the evidence document.`;
 }
 
-async function analyzeEvidence(documentText, requirementText, controlName) {
+async function analyzeEvidence(documentText, requirementText, controlName, customInstructions) {
   console.log('🤖 Sending document to GPT-4 for analysis...');
   console.log(`📊 Document length: ${documentText.length} chars | Requirement length: ${requirementText.length} chars`);
+  if (customInstructions) {
+    console.log(`📋 Custom instructions: ${customInstructions.length} chars`);
+  }
 
   try {
     const response = await openai.chat.completions.create({
       model: 'gpt-4o',
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt(documentText, requirementText, controlName) },
+        { role: 'user', content: buildUserPrompt(documentText, requirementText, controlName, customInstructions) },
       ],
       temperature: 0.2,
       max_tokens: 16384,
