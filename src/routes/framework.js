@@ -10,6 +10,10 @@ const { chunkText, needsChunking } = require('../utils/chunker');
 // ALL file types (CSV, XLSX, PDF) go through AI extraction
 // Returns unified response shape with controls, groups, suggestedLayout
 router.post('/parse', upload.single('file'), async (req, res) => {
+  // Allow up to 5 minutes for GPT processing of large files
+  req.setTimeout(300000);
+  res.setTimeout(300000);
+
   let filePath = null;
 
   try {
@@ -241,6 +245,9 @@ router.post('/parse', upload.single('file'), async (req, res) => {
 // POST /api/framework/enhance — AI-enhance extracted controls
 // Fills missing categories, descriptions, infers hierarchy
 router.post('/enhance', async (req, res) => {
+  req.setTimeout(300000);
+  res.setTimeout(300000);
+
   try {
     const { controls, context } = req.body;
 

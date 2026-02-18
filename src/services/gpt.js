@@ -4,6 +4,35 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+/**
+ * Attempt to recover a valid JSON object from a truncated GPT response.
+ * When max_tokens is hit, the JSON gets cut off mid-stream.
+ * We try to close open arrays/objects to salvage whatever was parsed.
+ */
+function attemptJsonRecovery(truncatedContent) {
+  // Common truncation patterns for our control extraction responses:
+  // The JSON has { "controls": [ {...}, {...}, ... (cut off here)
+  const closings = [
+    '', ']}', '}]}', '"]}', '"}]}', '"}],"groups":[]}',
+    '"]}}]}', 'null}]}',
+  ];
+
+  for (const closing of closings) {
+    try {
+      const attempt = truncatedContent + closing;
+      const parsed = JSON.parse(attempt);
+      if (parsed.controls && Array.isArray(parsed.controls)) {
+        console.log(`✅ JSON recovery succeeded with closing: "${closing}" (${parsed.controls.length} controls recovered)`);
+        return parsed;
+      }
+    } catch {
+      // Try next closing pattern
+    }
+  }
+
+  return null;
+}
+
 const SYSTEM_PROMPT = `You are an expert compliance auditor specializing in detailed gap analysis between compliance requirements and evidence documentation.
 
 Your task is to analyze whether evidence documents satisfy specific compliance requirements. You must:
@@ -215,7 +244,7 @@ async function extractFrameworkControls(documentText, context = {}) {
         { role: 'user', content: buildFrameworkExtractionPrompt(documentText, context) },
       ],
       temperature: 0.1,
-      max_tokens: 4096,
+      max_tokens: 16384,
       response_format: { type: 'json_object' },
     });
 
@@ -231,8 +260,19 @@ async function extractFrameworkControls(documentText, context = {}) {
     try {
       result = JSON.parse(content);
     } catch (parseErr) {
-      console.error('❌ Failed to parse GPT framework extraction response as JSON');
-      throw new Error('GPT returned invalid JSON response during framework extraction');
+      // If truncated, try to salvage partial JSON
+      if (choice.finish_reason === 'length') {
+        console.warn('⚠️ Attempting to recover truncated JSON...');
+        result = attemptJsonRecovery(content);
+        if (!result) {
+          console.error('❌ Could not recover truncated JSON');
+          throw new Error('GPT response was truncated and could not be recovered. Try a smaller file or fewer rows.');
+        }
+        console.log('✅ Recovered partial JSON from truncated response');
+      } else {
+        console.error('❌ Failed to parse GPT framework extraction response as JSON');
+        throw new Error('GPT returned invalid JSON response during framework extraction');
+      }
     }
 
     if (!result.controls || !Array.isArray(result.controls)) {
@@ -389,7 +429,7 @@ async function extractControlsFromTabular(textData, context = {}) {
         { role: 'user', content: buildTabularExtractionPrompt(textData, context) },
       ],
       temperature: 0.1,
-      max_tokens: 4096,
+      max_tokens: 16384,
       response_format: { type: 'json_object' },
     });
 
@@ -405,8 +445,19 @@ async function extractControlsFromTabular(textData, context = {}) {
     try {
       result = JSON.parse(content);
     } catch (parseErr) {
-      console.error('❌ Failed to parse GPT tabular extraction response as JSON');
-      throw new Error('GPT returned invalid JSON response during tabular extraction');
+      // If truncated, try to salvage partial JSON
+      if (choice.finish_reason === 'length') {
+        console.warn('⚠️ Attempting to recover truncated tabular JSON...');
+        result = attemptJsonRecovery(content);
+        if (!result) {
+          console.error('❌ Could not recover truncated tabular JSON');
+          throw new Error('GPT response was truncated and could not be recovered. Try a smaller file or fewer rows.');
+        }
+        console.log('✅ Recovered partial JSON from truncated tabular response');
+      } else {
+        console.error('❌ Failed to parse GPT tabular extraction response as JSON');
+        throw new Error('GPT returned invalid JSON response during tabular extraction');
+      }
     }
 
     if (!result.controls || !Array.isArray(result.controls)) {
@@ -532,7 +583,7 @@ async function enhanceFrameworkControls(controls, context = {}) {
         { role: 'user', content: buildEnhancePrompt(controls, context) },
       ],
       temperature: 0.2,
-      max_tokens: 4096,
+      max_tokens: 16384,
       response_format: { type: 'json_object' },
     });
 
