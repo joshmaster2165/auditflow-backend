@@ -44,7 +44,8 @@ function chunkText(text, maxChars = MAX_CHARS_PER_CHUNK, overlap = OVERLAP_CHARS
     }
 
     chunks.push(text.substring(start, end));
-    start = end - overlap;
+    // Ensure start always advances forward to prevent infinite loops
+    start = Math.max(end - overlap, start + 1);
   }
 
   console.log(`📦 Chunked ${text.length} chars into ${chunks.length} chunks`);
