@@ -78,9 +78,12 @@ async function run() {
           chunks[i] = null;
 
           // Extract only what we need, then free the extraction object
-          const controls = extraction.result.controls || [];
+          const controls = extraction.result.controls;
           const usage = extraction.usage;
-          // Avoid spread operator — push one at a time to prevent "Invalid array length"
+          if (!Array.isArray(controls)) {
+            console.error(`❌ [Worker] GPT returned non-array controls in chunk ${i + 1}:`, typeof controls);
+            continue;
+          }
           for (const c of controls) allControls.push(c);
 
           if (i === 0) {
@@ -119,7 +122,7 @@ async function run() {
         extractionNotes = `Spreadsheet was processed in ${chunkCount} chunks. ${allControls.length} unique controls extracted from ${parsed.totalRows} rows.`;
       } else {
         const extraction = await extractControlsFromTabular(textData, context);
-        allControls = extraction.result.controls;
+        allControls = extraction.result.controls || [];
         allGroups = extraction.result.groups || [];
         frameworkDetected = extraction.result.framework_detected || null;
         versionDetected = extraction.result.version_detected || null;
@@ -163,9 +166,12 @@ async function run() {
           chunks[i] = null;
 
           // Extract only what we need
-          const controls = extraction.result.controls || [];
+          const controls = extraction.result.controls;
           const usage = extraction.usage;
-          // Avoid spread operator — push one at a time to prevent "Invalid array length"
+          if (!Array.isArray(controls)) {
+            console.error(`❌ [Worker] GPT returned non-array controls in chunk ${i + 1}:`, typeof controls);
+            continue;
+          }
           for (const c of controls) allControls.push(c);
 
           if (i === 0) {
@@ -209,7 +215,7 @@ async function run() {
         const extraction = await extractFrameworkControls(parsed.text, context);
         parsed = null; // Free parsed after extraction
         if (global.gc) global.gc();
-        allControls = extraction.result.controls;
+        allControls = extraction.result.controls || [];
         allGroups = extraction.result.groups || [];
         frameworkDetected = extraction.result.framework_detected || null;
         versionDetected = extraction.result.version_detected || null;
@@ -261,17 +267,27 @@ async function run() {
     }
 
     // Send completed result back to main thread
-    parentPort.postMessage({
-      type: 'completed',
-      result: {
-        success: true,
-        fileType: parsedType === 'tabular' ? 'tabular' : 'document',
-        fileName,
-        data: responseData,
-      },
-    });
+    try {
+      parentPort.postMessage({
+        type: 'completed',
+        result: {
+          success: true,
+          fileType: parsedType === 'tabular' ? 'tabular' : 'document',
+          fileName,
+          data: responseData,
+        },
+      });
+    } catch (postErr) {
+      console.error(`❌ [Worker] Failed to send result to main thread:`, postErr.message);
+      console.error(`❌ [Worker] Result size: ${JSON.stringify(responseData).length} chars, ${allControls.length} controls`);
+      parentPort.postMessage({
+        type: 'failed',
+        error: `Processing completed but result too large to transfer: ${postErr.message}`,
+      });
+    }
   } catch (err) {
     console.error(`❌ [Worker] Framework parse error:`, err.message);
+    console.error(`❌ [Worker] Stack trace:`, err.stack);
     parentPort.postMessage({
       type: 'failed',
       error: err.message,
@@ -283,5 +299,6 @@ async function run() {
 
 run().catch((err) => {
   console.error('❌ [Worker] Unhandled error:', err.message);
+  console.error('❌ [Worker] Stack trace:', err.stack);
   parentPort.postMessage({ type: 'failed', error: err.message });
 });

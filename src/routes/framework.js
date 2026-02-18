@@ -186,7 +186,7 @@ router.post('/enhance', async (req, res) => {
       }
 
       const enhancement = await enhanceFrameworkControls(batches[i], context || {});
-      allEnhanced.push(...enhancement.result.controls);
+      for (const c of (enhancement.result.controls || [])) allEnhanced.push(c);
 
       if (enhancement.result.summary) {
         totalSummary.categories_added += enhancement.result.summary.categories_added || 0;
