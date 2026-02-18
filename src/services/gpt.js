@@ -295,6 +295,174 @@ async function extractFrameworkControls(documentText, context = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Tabular Extraction — extract controls from CSV/XLSX data
+// ─────────────────────────────────────────────────────────────
+
+const TABULAR_EXTRACTION_PROMPT = `You are an expert compliance framework analyst. You are analyzing structured spreadsheet data (CSV or XLSX) that contains compliance framework controls, requirements, or policies.
+
+Your task is to intelligently interpret the columns and rows, and produce structured compliance controls.
+
+Your approach:
+1. FIRST, analyze the column headers to understand what each column represents (control ID, title, description, category, etc.)
+2. THEN, map every row into a structured control
+3. If a column clearly maps to a known field (control number, title, description, category/domain/section), use it directly
+4. If the spreadsheet has columns that don't map to standard fields, preserve that data in the control's description or as additional context
+5. Generate any missing fields intelligently:
+   - If there's no description column but there IS a title, generate a brief description from context
+   - If there's no category/group column, infer groups from numbering patterns or content similarity
+   - If there's no explicit control number, generate meaningful IDs (e.g., "CTRL-001", "SEC-1.1")
+
+Important rules:
+- Map EVERY row to a control — do not skip any data rows
+- Preserve the original data faithfully — don't change values that are already good
+- If a cell is empty, treat it as missing (null) — don't fabricate data for it
+- Detect hierarchy from numbering patterns (e.g., "1.1" is child of "1", "AC-1.a" is child of "AC-1")
+- Suggest the best display layout based on what you see
+
+You must respond with valid JSON only. Do not include any text outside the JSON object.`;
+
+function buildTabularExtractionPrompt(textData, context) {
+  let prompt = `Analyze and extract all compliance controls from the following spreadsheet data.`;
+
+  if (context?.frameworkName) {
+    prompt += `\n\nFramework name (provided by user): ${context.frameworkName}`;
+  }
+  if (context?.frameworkVersion) {
+    prompt += `\nVersion: ${context.frameworkVersion}`;
+  }
+
+  prompt += `\n\n## Spreadsheet Data:\n${textData}`;
+
+  prompt += `\n\n## Instructions:
+
+Analyze the column structure, then map every row to a structured control. Return a JSON object with this structure:
+
+{
+  "framework_detected": "<name of framework detected from the data, or null>",
+  "version_detected": "<version detected, or null>",
+  "column_mapping": {
+    "<original column name>": "<what this column represents: control_number | title | description | category | parent | level | other>"
+  },
+  "suggested_layout": "tree" | "grouped" | "flat",
+  "suggested_grouping_field": "<what concept groups these controls — e.g. 'domain', 'section', 'category'>",
+  "groups": [
+    {
+      "name": "<group/category/domain name>",
+      "description": "<brief description, or null>",
+      "sort_order": <number>
+    }
+  ],
+  "controls": [
+    {
+      "control_number": "<from spreadsheet or generated>",
+      "title": "<from spreadsheet or generated>",
+      "description": "<from spreadsheet or generated — combine relevant columns if needed>",
+      "group": "<which group this belongs to>",
+      "parent_control_number": "<parent control's number if hierarchical, or null>",
+      "level": <0 for top-level, 1 for sub-control, etc.>,
+      "sort_order": <row order from spreadsheet>
+    }
+  ],
+  "extraction_notes": "<notes about how you interpreted the columns and any decisions you made>"
+}
+
+Key guidance:
+- Map EVERY row — the output controls count should match the input row count (unless rows are truly empty)
+- If a column contains long text, that's likely the description
+- If a column has short codes or numbers, that's likely the control ID
+- If a column has repeated values across many rows, that's likely a category/group
+- Combine multiple text columns into the description if they contain useful requirement details
+- Every control must belong to a group. If ungrouped, create a "General" group.`;
+
+  return prompt;
+}
+
+async function extractControlsFromTabular(textData, context = {}) {
+  console.log('🤖 Sending tabular data to GPT-4 for control extraction...');
+  console.log(`📊 Text length: ${textData.length} chars`);
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4-turbo-preview',
+      messages: [
+        { role: 'system', content: TABULAR_EXTRACTION_PROMPT },
+        { role: 'user', content: buildTabularExtractionPrompt(textData, context) },
+      ],
+      temperature: 0.1,
+      max_tokens: 4096,
+      response_format: { type: 'json_object' },
+    });
+
+    const choice = response.choices[0];
+
+    if (choice.finish_reason === 'length') {
+      console.warn('⚠️ GPT tabular extraction response was truncated. Some controls may be missing.');
+    }
+
+    const content = choice.message.content;
+    let result;
+
+    try {
+      result = JSON.parse(content);
+    } catch (parseErr) {
+      console.error('❌ Failed to parse GPT tabular extraction response as JSON');
+      throw new Error('GPT returned invalid JSON response during tabular extraction');
+    }
+
+    if (!result.controls || !Array.isArray(result.controls)) {
+      throw new Error('GPT response missing controls array');
+    }
+
+    // Backfill missing fields
+    let autoIdCounter = 1;
+    result.controls = result.controls
+      .filter((control) => {
+        if (!control.title && !control.description) {
+          console.warn(`⚠️ Dropping empty control: ${JSON.stringify(control).substring(0, 100)}`);
+          return false;
+        }
+        return true;
+      })
+      .map((control) => {
+        if (!control.control_number) {
+          control.control_number = `CTRL-${String(autoIdCounter++).padStart(3, '0')}`;
+        }
+        if (!control.title && control.description) {
+          control.title = control.description.substring(0, 80) + (control.description.length > 80 ? '...' : '');
+        }
+        control.description = control.description || null;
+        control.group = control.group || control.category || null;
+        control.parent_control_number = control.parent_control_number || null;
+        control.level = control.level || 0;
+        control.sort_order = control.sort_order || 0;
+        return control;
+      });
+
+    result.suggested_layout = result.suggested_layout || 'grouped';
+    result.suggested_grouping_field = result.suggested_grouping_field || 'category';
+    result.groups = result.groups || [];
+
+    console.log(`✅ Extracted ${result.controls.length} controls from tabular data (layout: ${result.suggested_layout}, groups: ${result.groups.length})`);
+
+    return {
+      result,
+      model: response.model,
+      usage: response.usage,
+      finish_reason: choice.finish_reason,
+      truncated: choice.finish_reason === 'length',
+    };
+  } catch (err) {
+    if (err.status === 429) {
+      throw new Error('OpenAI rate limit exceeded. Please try again later.');
+    }
+    if (err.status === 401) {
+      throw new Error('Invalid OpenAI API key.');
+    }
+    throw err;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Framework Enhancement — improve extracted control data
 // ─────────────────────────────────────────────────────────────
 
@@ -402,4 +570,4 @@ async function enhanceFrameworkControls(controls, context = {}) {
   }
 }
 
-module.exports = { analyzeEvidence, extractFrameworkControls, enhanceFrameworkControls };
+module.exports = { analyzeEvidence, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls };

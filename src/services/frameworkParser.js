@@ -30,9 +30,8 @@ async function parseFrameworkFile(filePath, mimeType) {
 function parseTabularFile(filePath) {
   const workbook = XLSX.readFile(filePath, {
     type: 'file',
-    cellDates: true,
-    cellText: true,
-    raw: false,
+    cellDates: false,
+    raw: true,
   });
 
   const sheetName = workbook.SheetNames[0];
@@ -51,11 +50,17 @@ function parseTabularFile(filePath) {
     throw new Error('File must contain at least a header row and one data row');
   }
 
-  const headers = jsonData[0].map((h) => String(h).trim());
+  const headers = jsonData[0].map((h) => {
+    const val = h;
+    if (val === undefined || val === null) return '';
+    return String(val).trim();
+  }).filter((h) => h !== '');
+
   const rows = jsonData.slice(1).map((row) => {
     const obj = {};
     headers.forEach((h, i) => {
-      obj[h] = row[i] !== undefined ? String(row[i]).trim() : '';
+      const val = row[i];
+      obj[h] = (val !== undefined && val !== null) ? String(val).trim() : '';
     });
     return obj;
   });
@@ -106,4 +111,27 @@ async function parsePdfFile(filePath) {
   };
 }
 
-module.exports = { parseFrameworkFile };
+/**
+ * Convert tabular data (headers + rows) into a text format for GPT consumption.
+ * Sends all rows so GPT can map every row to a control.
+ */
+function tabularToText(headers, rows) {
+  let text = `SPREADSHEET DATA\n`;
+  text += `Columns: ${headers.join(' | ')}\n`;
+  text += `Total rows: ${rows.length}\n\n`;
+
+  rows.forEach((row, i) => {
+    const fields = headers
+      .map((h) => {
+        const val = row[h];
+        return val ? `${h}: ${val}` : null;
+      })
+      .filter(Boolean)
+      .join(' | ');
+    text += `Row ${i + 1}: ${fields}\n`;
+  });
+
+  return text;
+}
+
+module.exports = { parseFrameworkFile, tabularToText };
