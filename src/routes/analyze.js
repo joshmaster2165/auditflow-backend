@@ -408,7 +408,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       .select(`
         *,
         evidence:evidence_id (
-          id, file_name, file_type, mime_type, file_path, storage_path
+          id, file_name, file_type, file_path
         ),
         controls:control_id (id, title, control_number)
       `)
@@ -424,12 +424,12 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       return res.status(400).json({ error: 'Evidence record not found for this analysis' });
     }
 
-    const filePath = evidence.file_path || evidence.storage_path;
+    const filePath = evidence.file_path;
     if (!filePath) {
       return res.status(400).json({ error: 'Evidence file path not available' });
     }
 
-    const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
+    const mimeType = evidence.file_type || 'text/plain';
 
     // 2. Check for cached viewer data in diff_data
     let documentText = analysis.diff_data?.viewer_document_text || null;
