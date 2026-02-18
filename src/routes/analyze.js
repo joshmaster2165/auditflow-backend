@@ -6,21 +6,10 @@ const { parseDocument } = require('../services/documentParser');
 const { analyzeEvidence } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
+const { createJobStore } = require('../utils/analysisHelpers');
 
 // ── In-memory job store for async group analysis ──
-const jobs = new Map();
-
-// Clean up old jobs every 10 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, job] of jobs) {
-    if ((job.status === 'completed' || job.status === 'failed') && now - job.completedAt > 30 * 60 * 1000) {
-      jobs.delete(id);
-    } else if (job.status === 'processing' && now - job.startedAt > 20 * 60 * 1000) {
-      jobs.set(id, { ...job, status: 'failed', error: 'Group analysis timed out after 20 minutes', completedAt: Date.now() });
-    }
-  }
-}, 10 * 60 * 1000);
+const jobs = createJobStore({ processingTimeoutMs: 20 * 60 * 1000 });
 
 // POST /api/analyze/evidence/:evidenceId - Full analysis pipeline
 router.post('/evidence/:evidenceId', async (req, res) => {
@@ -123,10 +112,10 @@ router.post('/evidence/:evidenceId', async (req, res) => {
     // 6. Send to GPT for analysis
     const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
 
-    // 6. Generate diff visualization
+    // 7. Generate diff visualization
     const diffData = generateDiff(gptResult.analysis, requirementText);
 
-    // 7. Store results in analysis_results table
+    // 8. Store results in analysis_results table
     const analysisRecord = {
       evidence_id: evidenceId,
       control_id: control.id || null,
@@ -169,7 +158,7 @@ router.post('/evidence/:evidenceId', async (req, res) => {
 
     console.log(`✅ Analysis saved: ${savedAnalysis.id}`);
 
-    // 8. Return analysis response
+    // 9. Return analysis response
     res.json({
       success: true,
       analysis_id: savedAnalysis.id,
@@ -197,7 +186,7 @@ router.post('/evidence/:evidenceId', async (req, res) => {
       details: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   } finally {
-    // 9. Clean up temp files
+    // 10. Clean up temp files
     cleanupFile(tempFilePath);
   }
 });
@@ -654,7 +643,6 @@ router.post('/group-by-ids/:evidenceId', async (req, res) => {
     }
 
     console.log(`\n🔍 Starting GROUP-BY-IDS analysis for evidence: ${evidenceId}, ${controlIds.length} controls`);
-    console.log(`📋 [GroupByIds] Received controlIds:`, JSON.stringify(controlIds));
 
     // 1. Fetch evidence record (just need to verify it exists and has a file)
     const { data: evidence, error: evidenceError } = await supabase
@@ -673,14 +661,11 @@ router.post('/group-by-ids/:evidenceId', async (req, res) => {
     }
 
     // 2. Fetch controls to validate they exist and get names for the response
-    console.log(`📋 [GroupByIds] Querying controls table with .in('id', ...) for ${controlIds.length} IDs`);
     const { data: controls, error: controlsError } = await supabase
       .from('controls')
       .select('id, control_number, title')
       .in('id', controlIds)
       .order('sort_order', { ascending: true });
-
-    console.log(`📋 [GroupByIds] Query result: ${controls?.length || 0} controls found, error: ${controlsError?.message || 'none'}`);
 
     if (controlsError) {
       return res.status(500).json({ error: 'Failed to fetch controls', details: controlsError.message, receivedIds: controlIds });

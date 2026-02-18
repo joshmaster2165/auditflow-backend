@@ -2,6 +2,7 @@ const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -46,7 +47,7 @@ async function testConnection() {
 async function downloadFile(filePath) {
   const uniqueId = crypto.randomUUID();
   const fileName = path.basename(filePath);
-  const localPath = path.join('/tmp', `auditflow-${uniqueId}-${fileName}`);
+  const localPath = path.join(os.tmpdir(), `auditflow-${uniqueId}-${fileName}`);
 
   console.log(`📥 Downloading file: ${filePath}`);
 
@@ -80,6 +81,7 @@ async function downloadFile(filePath) {
 
     const response = await axios.get(signedData.signedUrl, {
       responseType: 'arraybuffer',
+      timeout: 60000,
     });
 
     fs.writeFileSync(localPath, Buffer.from(response.data));

@@ -1,7 +1,6 @@
 const { supabase, downloadFile, cleanupFile } = require('../utils/supabase');
 const { parseDocument } = require('./documentParser');
-const { analyzeEvidence } = require('./gpt');
-const { generateDiff } = require('./diffGenerator');
+const { analyzeControlWithRetry } = require('../utils/analysisHelpers');
 
 /**
  * Fetch custom_instructions for a project. Returns null if not found or empty.
@@ -160,8 +159,6 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
       throw new Error('Evidence has no linked control (control_id is null)');
     }
 
-    const framework = parentControl.frameworks || null;
-
     // Fetch project-level custom instructions (once, before the loop)
     const customInstructions = await fetchCustomInstructions(evidence.project_id);
 
@@ -209,13 +206,12 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
 
     console.log(`📄 [Group ${jobId}] Document parsed: ${documentText.length} chars`);
 
-    // 6. Analyze each child control sequentially
+    // 6. Analyze each child control sequentially using shared helper
     const results = [];
     const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 
     for (let i = 0; i < childControls.length; i++) {
       const child = childControls[i];
-      const childFramework = child.frameworks || framework;
       const controlName = child.title || `Control ${child.control_number}`;
 
       const progressMsg = `Analyzing control ${i + 1} of ${childControls.length} (${child.control_number} - ${controlName})`;
@@ -226,142 +222,28 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
         job.controlsCompleted = i;
       }
 
-      try {
-        // Build requirement text using shared helper
-        const requirementText = buildRequirementText(child, childFramework);
+      const result = await analyzeControlWithRetry({
+        control: child,
+        documentText,
+        customInstructions,
+        evidenceId,
+        projectId: evidence.project_id,
+        buildRequirementText,
+        logPrefix: `Group ${jobId}`,
+      });
 
-        // Call GPT analysis
-        const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
+      results.push(result);
 
-        // Generate diff visualization
-        const diffData = generateDiff(gptResult.analysis, requirementText);
+      if (result.usage) {
+        totalUsage.prompt_tokens += result.usage.prompt_tokens || 0;
+        totalUsage.completion_tokens += result.usage.completion_tokens || 0;
+        totalUsage.total_tokens += result.usage.total_tokens || 0;
+      }
 
-        // Store analysis result in DB
-        const analysisRecord = {
-          evidence_id: evidenceId,
-          control_id: child.id,
-          project_id: evidence.project_id || null,
-          analyzed_at: new Date().toISOString(),
-          analysis_version: 'v1.0-group',
-          model_used: gptResult.model || 'gpt-4o',
-          status: gptResult.analysis.status,
-          confidence_score: gptResult.analysis.confidence_score,
-          compliance_percentage: gptResult.analysis.compliance_percentage,
-          findings: gptResult.analysis,
-          diff_data: diffData,
-          summary: gptResult.analysis.summary,
-          recommendations: gptResult.analysis.recommendations || [],
-          raw_response: {
-            usage: gptResult.usage,
-            finish_reason: gptResult.finish_reason,
-            model: gptResult.model,
-          },
-        };
-
-        const { data: saved, error: saveError } = await supabase
-          .from('analysis_results')
-          .insert(analysisRecord)
-          .select()
-          .single();
-
-        if (saveError) {
-          console.error(`⚠️ [Group ${jobId}] DB save failed for ${child.control_number}: ${saveError.message}`);
-        }
-
-        results.push({
-          analysis_id: saved?.id || null,
-          control_id: child.id,
-          control_number: child.control_number,
-          control_title: child.title,
-          status: gptResult.analysis.status,
-          compliance_percentage: gptResult.analysis.compliance_percentage,
-          confidence_score: gptResult.analysis.confidence_score,
-          summary: gptResult.analysis.summary,
-          save_error: saveError?.message || null,
-        });
-
-        // Accumulate token usage
-        totalUsage.prompt_tokens += gptResult.usage?.prompt_tokens || 0;
-        totalUsage.completion_tokens += gptResult.usage?.completion_tokens || 0;
-        totalUsage.total_tokens += gptResult.usage?.total_tokens || 0;
-
-        console.log(`✅ [Group ${jobId}] ${child.control_number}: ${gptResult.analysis.status} (${gptResult.analysis.compliance_percentage}%)`);
-      } catch (err) {
-        console.error(`❌ [Group ${jobId}] Error analyzing ${child.control_number}: ${err.message}`);
-
-        // Rate limit retry
-        if (err.message && (err.message.includes('429') || err.message.toLowerCase().includes('rate limit'))) {
-          console.log(`⏳ [Group ${jobId}] Rate limited. Waiting 60s before retrying ${child.control_number}...`);
-          if (job) job.progress = `Rate limited. Waiting 60s before retrying ${child.control_number}...`;
-          await new Promise((resolve) => setTimeout(resolve, 60000));
-
-          try {
-            const requirementText = buildRequirementText(child, childFramework);
-            const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
-            const diffData = generateDiff(gptResult.analysis, requirementText);
-
-            const analysisRecord = {
-              evidence_id: evidenceId,
-              control_id: child.id,
-              project_id: evidence.project_id || null,
-              analyzed_at: new Date().toISOString(),
-              analysis_version: 'v1.0-group',
-              model_used: gptResult.model || 'gpt-4o',
-              status: gptResult.analysis.status,
-              confidence_score: gptResult.analysis.confidence_score,
-              compliance_percentage: gptResult.analysis.compliance_percentage,
-              findings: gptResult.analysis,
-              diff_data: diffData,
-              summary: gptResult.analysis.summary,
-              recommendations: gptResult.analysis.recommendations || [],
-              raw_response: {
-                usage: gptResult.usage,
-                finish_reason: gptResult.finish_reason,
-                model: gptResult.model,
-              },
-            };
-
-            const { data: saved, error: saveError } = await supabase
-              .from('analysis_results')
-              .insert(analysisRecord)
-              .select()
-              .single();
-
-            results.push({
-              analysis_id: saved?.id || null,
-              control_id: child.id,
-              control_number: child.control_number,
-              control_title: child.title,
-              status: gptResult.analysis.status,
-              compliance_percentage: gptResult.analysis.compliance_percentage,
-              confidence_score: gptResult.analysis.confidence_score,
-              summary: gptResult.analysis.summary,
-              save_error: saveError?.message || null,
-            });
-
-            totalUsage.prompt_tokens += gptResult.usage?.prompt_tokens || 0;
-            totalUsage.completion_tokens += gptResult.usage?.completion_tokens || 0;
-            totalUsage.total_tokens += gptResult.usage?.total_tokens || 0;
-
-            console.log(`✅ [Group ${jobId}] Retry succeeded for ${child.control_number}`);
-            continue;
-          } catch (retryErr) {
-            console.error(`❌ [Group ${jobId}] Retry also failed for ${child.control_number}: ${retryErr.message}`);
-          }
-        }
-
-        // Record error result and continue to next control
-        results.push({
-          analysis_id: null,
-          control_id: child.id,
-          control_number: child.control_number,
-          control_title: child.title,
-          status: 'error',
-          error: err.message,
-          compliance_percentage: null,
-          confidence_score: null,
-          summary: null,
-        });
+      if (result.status !== 'error') {
+        console.log(`✅ [Group ${jobId}] ${child.control_number}: ${result.status} (${result.compliance_percentage}%)`);
+      } else {
+        console.error(`❌ [Group ${jobId}] ${child.control_number}: ${result.error}`);
       }
     }
 
@@ -478,13 +360,12 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
 
     console.log(`📄 [GroupByIds ${jobId}] Document parsed: ${documentText.length} chars`);
 
-    // 5. Analyze each control sequentially
+    // 5. Analyze each control sequentially using shared helper
     const results = [];
     const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 
     for (let i = 0; i < controls.length; i++) {
       const ctrl = controls[i];
-      const ctrlFramework = ctrl.frameworks || null;
       const controlName = ctrl.title || `Control ${ctrl.control_number}`;
 
       const progressMsg = `Analyzing control ${i + 1} of ${controls.length} (${ctrl.control_number} - ${controlName})`;
@@ -495,135 +376,28 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
         job.controlsCompleted = i;
       }
 
-      try {
-        const requirementText = buildRequirementText(ctrl, ctrlFramework);
-        const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
-        const diffData = generateDiff(gptResult.analysis, requirementText);
+      const result = await analyzeControlWithRetry({
+        control: ctrl,
+        documentText,
+        customInstructions,
+        evidenceId,
+        projectId: evidence.project_id,
+        buildRequirementText,
+        logPrefix: `GroupByIds ${jobId}`,
+      });
 
-        const analysisRecord = {
-          evidence_id: evidenceId,
-          control_id: ctrl.id,
-          project_id: evidence.project_id || null,
-          analyzed_at: new Date().toISOString(),
-          analysis_version: 'v1.0-group',
-          model_used: gptResult.model || 'gpt-4o',
-          status: gptResult.analysis.status,
-          confidence_score: gptResult.analysis.confidence_score,
-          compliance_percentage: gptResult.analysis.compliance_percentage,
-          findings: gptResult.analysis,
-          diff_data: diffData,
-          summary: gptResult.analysis.summary,
-          recommendations: gptResult.analysis.recommendations || [],
-          raw_response: {
-            usage: gptResult.usage,
-            finish_reason: gptResult.finish_reason,
-            model: gptResult.model,
-          },
-        };
+      results.push(result);
 
-        const { data: saved, error: saveError } = await supabase
-          .from('analysis_results')
-          .insert(analysisRecord)
-          .select()
-          .single();
+      if (result.usage) {
+        totalUsage.prompt_tokens += result.usage.prompt_tokens || 0;
+        totalUsage.completion_tokens += result.usage.completion_tokens || 0;
+        totalUsage.total_tokens += result.usage.total_tokens || 0;
+      }
 
-        if (saveError) {
-          console.error(`⚠️ [GroupByIds ${jobId}] DB save failed for ${ctrl.control_number}: ${saveError.message}`);
-        }
-
-        results.push({
-          analysis_id: saved?.id || null,
-          control_id: ctrl.id,
-          control_number: ctrl.control_number,
-          control_title: ctrl.title,
-          status: gptResult.analysis.status,
-          compliance_percentage: gptResult.analysis.compliance_percentage,
-          confidence_score: gptResult.analysis.confidence_score,
-          summary: gptResult.analysis.summary,
-          save_error: saveError?.message || null,
-        });
-
-        totalUsage.prompt_tokens += gptResult.usage?.prompt_tokens || 0;
-        totalUsage.completion_tokens += gptResult.usage?.completion_tokens || 0;
-        totalUsage.total_tokens += gptResult.usage?.total_tokens || 0;
-
-        console.log(`✅ [GroupByIds ${jobId}] ${ctrl.control_number}: ${gptResult.analysis.status} (${gptResult.analysis.compliance_percentage}%)`);
-      } catch (err) {
-        console.error(`❌ [GroupByIds ${jobId}] Error analyzing ${ctrl.control_number}: ${err.message}`);
-
-        // Rate limit retry
-        if (err.message && (err.message.includes('429') || err.message.toLowerCase().includes('rate limit'))) {
-          console.log(`⏳ [GroupByIds ${jobId}] Rate limited. Waiting 60s before retrying ${ctrl.control_number}...`);
-          if (job) job.progress = `Rate limited. Waiting 60s before retrying ${ctrl.control_number}...`;
-          await new Promise((resolve) => setTimeout(resolve, 60000));
-
-          try {
-            const requirementText = buildRequirementText(ctrl, ctrlFramework);
-            const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
-            const diffData = generateDiff(gptResult.analysis, requirementText);
-
-            const analysisRecord = {
-              evidence_id: evidenceId,
-              control_id: ctrl.id,
-              project_id: evidence.project_id || null,
-              analyzed_at: new Date().toISOString(),
-              analysis_version: 'v1.0-group',
-              model_used: gptResult.model || 'gpt-4o',
-              status: gptResult.analysis.status,
-              confidence_score: gptResult.analysis.confidence_score,
-              compliance_percentage: gptResult.analysis.compliance_percentage,
-              findings: gptResult.analysis,
-              diff_data: diffData,
-              summary: gptResult.analysis.summary,
-              recommendations: gptResult.analysis.recommendations || [],
-              raw_response: {
-                usage: gptResult.usage,
-                finish_reason: gptResult.finish_reason,
-                model: gptResult.model,
-              },
-            };
-
-            const { data: saved, error: saveError } = await supabase
-              .from('analysis_results')
-              .insert(analysisRecord)
-              .select()
-              .single();
-
-            results.push({
-              analysis_id: saved?.id || null,
-              control_id: ctrl.id,
-              control_number: ctrl.control_number,
-              control_title: ctrl.title,
-              status: gptResult.analysis.status,
-              compliance_percentage: gptResult.analysis.compliance_percentage,
-              confidence_score: gptResult.analysis.confidence_score,
-              summary: gptResult.analysis.summary,
-              save_error: saveError?.message || null,
-            });
-
-            totalUsage.prompt_tokens += gptResult.usage?.prompt_tokens || 0;
-            totalUsage.completion_tokens += gptResult.usage?.completion_tokens || 0;
-            totalUsage.total_tokens += gptResult.usage?.total_tokens || 0;
-
-            console.log(`✅ [GroupByIds ${jobId}] Retry succeeded for ${ctrl.control_number}`);
-            continue;
-          } catch (retryErr) {
-            console.error(`❌ [GroupByIds ${jobId}] Retry also failed for ${ctrl.control_number}: ${retryErr.message}`);
-          }
-        }
-
-        // Record error result and continue to next control
-        results.push({
-          analysis_id: null,
-          control_id: ctrl.id,
-          control_number: ctrl.control_number,
-          control_title: ctrl.title,
-          status: 'error',
-          error: err.message,
-          compliance_percentage: null,
-          confidence_score: null,
-          summary: null,
-        });
+      if (result.status !== 'error') {
+        console.log(`✅ [GroupByIds ${jobId}] ${ctrl.control_number}: ${result.status} (${result.compliance_percentage}%)`);
+      } else {
+        console.error(`❌ [GroupByIds ${jobId}] ${ctrl.control_number}: ${result.error}`);
       }
     }
 
@@ -635,8 +409,8 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
     console.log(`📊 [GroupByIds ${jobId}] Aggregate: ${aggregate.overall_status} (${aggregate.average_compliance_percentage}% avg)`);
 
     // 7. Update job as completed
-    // Include parentControl: null so the frontend transform handles this gracefully
-    // (category-based analysis has no parent — all controls are siblings)
+    // Include parentControl: null so the frontend transform handles category-based analysis
+    // without crashing on missing parentControl.id
     jobs.set(jobId, {
       status: 'completed',
       completedAt: Date.now(),
@@ -644,7 +418,7 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
         aggregate,
         results,
         parentControl: null,
-        controlIds: controlIds,
+        controlIds,
         evidence: {
           id: evidenceId,
           name: evidence.file_name,

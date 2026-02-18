@@ -8,19 +8,19 @@
     "dev": "nodemon src/index.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "latest",
-    "axios": "latest",
-    "cors": "latest",
-    "dotenv": "latest",
-    "express": "latest",
-    "mammoth": "latest",
+    "@supabase/supabase-js": "^2.96.0",
+    "axios": "^1.13.5",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "mammoth": "^1.11.0",
     "multer": "^2.0.2",
-    "openai": "latest",
+    "openai": "^6.22.0",
     "pdf-parse": "^1.1.1",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "nodemon": "latest"
+    "nodemon": "^3.1.11"
   },
   "engines": {
     "node": ">=18.0.0"

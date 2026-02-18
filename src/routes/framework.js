@@ -5,23 +5,12 @@ const { Worker } = require('worker_threads');
 const router = express.Router();
 const { upload } = require('../middleware/upload');
 const { enhanceFrameworkControls } = require('../services/gpt');
+const { createJobStore } = require('../utils/analysisHelpers');
 
 // ── In-memory job store for async processing ──
 // Worker threads run in separate V8 heaps, so if they OOM the main process
 // stays alive and the job Map is preserved (job gets marked as 'failed').
-const jobs = new Map();
-
-// Clean up old jobs every 10 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, job] of jobs) {
-    if ((job.status === 'completed' || job.status === 'failed') && now - job.completedAt > 30 * 60 * 1000) {
-      jobs.delete(id);
-    } else if (job.status === 'processing' && now - job.startedAt > 15 * 60 * 1000) {
-      jobs.set(id, { ...job, status: 'failed', error: 'Processing timed out after 15 minutes', completedAt: Date.now() });
-    }
-  }
-}, 10 * 60 * 1000);
+const jobs = createJobStore({ processingTimeoutMs: 20 * 60 * 1000 });
 
 // ── POST /api/framework/parse — Start async processing in worker thread ──
 router.post('/parse', upload.single('file'), async (req, res) => {
@@ -114,6 +103,10 @@ router.post('/parse', upload.single('file'), async (req, res) => {
 
 // ── GET /api/framework/parse/status/:jobId — Poll for result ──
 router.get('/parse/status/:jobId', (req, res) => {
+  // Prevent browser caching so polling always gets fresh data
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+
   const job = jobs.get(req.params.jobId);
 
   if (!job) {

@@ -1,11 +1,12 @@
 const multer = require('multer');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 
 // Storage: write to /tmp with unique filenames
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, '/tmp');
+    cb(null, os.tmpdir());
   },
   filename: (req, file, cb) => {
     const uniqueId = crypto.randomUUID();

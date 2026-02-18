@@ -5,6 +5,16 @@ const openai = new OpenAI({
 });
 
 /**
+ * Shared OpenAI error handler — maps API error codes to user-friendly messages.
+ * Replaces identical catch blocks across all GPT functions.
+ */
+function handleOpenAIError(err) {
+  if (err.status === 429) throw new Error('OpenAI rate limit exceeded. Please try again later.');
+  if (err.status === 401) throw new Error('Invalid OpenAI API key. Please check your OPENAI_API_KEY.');
+  throw err;
+}
+
+/**
  * Attempt to recover a valid JSON object from a truncated GPT response.
  * When max_tokens is hit, the JSON gets cut off mid-stream.
  * We try to close open arrays/objects to salvage whatever was parsed.
@@ -88,6 +98,14 @@ Break the requirement into its natural sub-requirements — use as many or as fe
 }
 
 async function analyzeEvidence(documentText, requirementText, controlName, customInstructions) {
+  // Input validation — fail fast with clear message instead of sending garbage to GPT
+  if (!documentText || documentText.trim().length < 10) {
+    throw new Error('Document text is empty or too short for meaningful analysis');
+  }
+  if (!requirementText || requirementText.trim().length < 10) {
+    throw new Error('Requirement text is empty or too short for analysis');
+  }
+
   console.log('🤖 Sending document to GPT-4 for analysis...');
   console.log(`📊 Document length: ${documentText.length} chars | Requirement length: ${requirementText.length} chars`);
   if (customInstructions) {
@@ -168,15 +186,7 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
       finish_reason: choice.finish_reason,
     };
   } catch (err) {
-    if (err.status === 429) {
-      console.error('❌ OpenAI rate limit exceeded. Please try again later.');
-      throw new Error('OpenAI rate limit exceeded. Please try again later.');
-    }
-    if (err.status === 401) {
-      console.error('❌ Invalid OpenAI API key');
-      throw new Error('Invalid OpenAI API key. Please check your OPENAI_API_KEY.');
-    }
-    throw err;
+    handleOpenAIError(err);
   }
 }
 
@@ -360,13 +370,7 @@ async function extractFrameworkControls(documentText, context = {}) {
       truncated: choice.finish_reason === 'length',
     };
   } catch (err) {
-    if (err.status === 429) {
-      throw new Error('OpenAI rate limit exceeded. Please try again later.');
-    }
-    if (err.status === 401) {
-      throw new Error('Invalid OpenAI API key.');
-    }
-    throw err;
+    handleOpenAIError(err);
   }
 }
 
@@ -543,13 +547,7 @@ async function extractControlsFromTabular(textData, context = {}) {
       truncated: choice.finish_reason === 'length',
     };
   } catch (err) {
-    if (err.status === 429) {
-      throw new Error('OpenAI rate limit exceeded. Please try again later.');
-    }
-    if (err.status === 401) {
-      throw new Error('Invalid OpenAI API key.');
-    }
-    throw err;
+    handleOpenAIError(err);
   }
 }
 
@@ -651,13 +649,7 @@ async function enhanceFrameworkControls(controls, context = {}) {
       truncated: choice.finish_reason === 'length',
     };
   } catch (err) {
-    if (err.status === 429) {
-      throw new Error('OpenAI rate limit exceeded. Please try again later.');
-    }
-    if (err.status === 401) {
-      throw new Error('Invalid OpenAI API key.');
-    }
-    throw err;
+    handleOpenAIError(err);
   }
 }
 
