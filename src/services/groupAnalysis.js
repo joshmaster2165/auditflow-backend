@@ -597,12 +597,16 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
     console.log(`📊 [GroupByIds ${jobId}] Aggregate: ${aggregate.overall_status} (${aggregate.average_compliance_percentage}% avg)`);
 
     // 7. Update job as completed
+    // Include parentControl: null so the frontend transform handles this gracefully
+    // (category-based analysis has no parent — all controls are siblings)
     jobs.set(jobId, {
       status: 'completed',
       completedAt: Date.now(),
       result: {
         aggregate,
         results,
+        parentControl: null,
+        controlIds: controlIds,
         evidence: {
           id: evidenceId,
           name: evidence.file_name,

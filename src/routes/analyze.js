@@ -652,11 +652,16 @@ router.post('/group-by-ids/:evidenceId', async (req, res) => {
     });
 
     // 4. Return immediately with job info
+    // Include parentControl: null so the frontend transform handles category-based analysis
+    // without crashing on missing parentControl.id
     return res.json({
       success: true,
       jobId,
       status: 'processing',
+      parentControl: null,
+      childControls: controls.length,
       controlCount: controls.length,
+      controlIds: controlIds,
       evidenceName: evidence.file_name,
     });
   } catch (err) {
