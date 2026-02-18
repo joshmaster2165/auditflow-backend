@@ -89,12 +89,51 @@ function parseTabularFile(filePath) {
 
 /**
  * Parse PDF files and extract text content.
+ *
+ * Uses a retry strategy with decreasing page limits to handle PDF.js
+ * "Invalid array length" errors on complex PDFs.
  */
 async function parsePdfFile(filePath) {
   let dataBuffer = fs.readFileSync(filePath);
-  const data = await pdfParse(dataBuffer);
-  // Free the raw file buffer immediately — pdf-parse has already extracted text
+
+  // Retry with progressively fewer pages if PDF.js hits internal array limits
+  const attempts = [
+    { max: 0, label: 'all pages' },
+    { max: 200, label: 'first 200 pages' },
+    { max: 100, label: 'first 100 pages' },
+    { max: 50, label: 'first 50 pages' },
+  ];
+
+  let data = null;
+  let pageLimited = false;
+
+  for (const attempt of attempts) {
+    try {
+      console.log(`📄 Attempting PDF parse (${attempt.label})...`);
+      data = await pdfParse(dataBuffer, { max: attempt.max });
+      if (attempt.max > 0) {
+        pageLimited = true;
+        console.warn(`⚠️ PDF parsed with page limit: ${attempt.label}`);
+      }
+      break; // Success — exit retry loop
+    } catch (err) {
+      if (err.message.includes('Invalid array length')) {
+        console.warn(`⚠️ PDF.js "Invalid array length" on ${attempt.label}, retrying with fewer pages...`);
+        continue; // Try next attempt with fewer pages
+      }
+      throw err; // Not the array size error — re-throw
+    }
+  }
+
+  // Free the raw file buffer immediately
   dataBuffer = null;
+
+  if (!data) {
+    throw new Error(
+      'PDF is too complex to parse even with page limits. ' +
+        'Please convert it to CSV or XLSX format and try again.'
+    );
+  }
 
   if (!data.text || data.text.trim().length === 0) {
     throw new Error(
@@ -104,7 +143,7 @@ async function parsePdfFile(filePath) {
   }
 
   let text = data.text.trim();
-  let truncated = false;
+  let truncated = pageLimited;
   const originalLength = text.length;
 
   if (text.length > MAX_PDF_CHARS) {
@@ -113,7 +152,7 @@ async function parsePdfFile(filePath) {
     truncated = true;
   }
 
-  console.log(`📄 Parsed PDF: ${data.numpages} pages, ${originalLength} chars${truncated ? ` (truncated to ${MAX_PDF_CHARS})` : ''}`);
+  console.log(`📄 Parsed PDF: ${data.numpages} pages, ${originalLength} chars${truncated ? ' (truncated)' : ''}`);
 
   return {
     type: 'document',
