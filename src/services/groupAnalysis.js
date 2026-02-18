@@ -373,8 +373,262 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
   }
 }
 
+/**
+ * Run group analysis by explicit control IDs (no parent-child hierarchy required).
+ * Analyzes one evidence file against a provided list of controls.
+ * Used for category-grouped controls that don't have parent_control_number set.
+ *
+ * @param {string} jobId - UUID of the job in the jobs Map
+ * @param {string} evidenceId - UUID of the evidence record
+ * @param {string[]} controlIds - Array of control UUIDs to analyze
+ * @param {Map} jobs - In-memory job store
+ */
+async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
+  let tempFilePath = null;
+  const startTime = Date.now();
+
+  try {
+    const job = jobs.get(jobId);
+
+    // 1. Fetch evidence record (no control join needed)
+    const { data: evidence, error: evidenceError } = await supabase
+      .from('evidence')
+      .select('*')
+      .eq('id', evidenceId)
+      .single();
+
+    if (evidenceError || !evidence) {
+      throw new Error(`Evidence not found: ${evidenceError?.message || 'no data'}`);
+    }
+
+    // 2. Fetch the specified controls with their frameworks
+    const { data: controls, error: controlsError } = await supabase
+      .from('controls')
+      .select('*, frameworks:framework_id (*)')
+      .in('id', controlIds)
+      .order('sort_order', { ascending: true });
+
+    if (controlsError) {
+      throw new Error(`Failed to fetch controls: ${controlsError.message}`);
+    }
+
+    if (!controls || controls.length === 0) {
+      throw new Error('No controls found for the provided IDs');
+    }
+
+    console.log(`📊 [GroupByIds ${jobId}] ${controls.length} controls to analyze`);
+
+    // Update job with control count
+    if (job) {
+      job.controlsTotal = controls.length;
+      job.controlsCompleted = 0;
+    }
+
+    // 3. Download evidence file — ONCE
+    const filePath = evidence.file_path || evidence.storage_path;
+    if (!filePath) {
+      throw new Error('Evidence record has no file path');
+    }
+
+    if (job) job.progress = 'Downloading evidence file...';
+    tempFilePath = await downloadFile(filePath);
+
+    // 4. Parse document — ONCE
+    if (job) job.progress = 'Parsing document...';
+    const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
+    const documentText = await parseDocument(tempFilePath, mimeType);
+
+    console.log(`📄 [GroupByIds ${jobId}] Document parsed: ${documentText.length} chars`);
+
+    // 5. Analyze each control sequentially
+    const results = [];
+    const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+
+    for (let i = 0; i < controls.length; i++) {
+      const ctrl = controls[i];
+      const ctrlFramework = ctrl.frameworks || null;
+      const controlName = ctrl.title || `Control ${ctrl.control_number}`;
+
+      const progressMsg = `Analyzing control ${i + 1} of ${controls.length} (${ctrl.control_number} - ${controlName})`;
+      console.log(`🔍 [GroupByIds ${jobId}] ${progressMsg}`);
+
+      if (job) {
+        job.progress = progressMsg;
+        job.controlsCompleted = i;
+      }
+
+      try {
+        const requirementText = buildRequirementText(ctrl, ctrlFramework);
+        const gptResult = await analyzeEvidence(documentText, requirementText, controlName);
+        const diffData = generateDiff(gptResult.analysis, requirementText);
+
+        const analysisRecord = {
+          evidence_id: evidenceId,
+          control_id: ctrl.id,
+          project_id: evidence.project_id || null,
+          analyzed_at: new Date().toISOString(),
+          analysis_version: 'v1.0-group',
+          model_used: gptResult.model || 'gpt-4o',
+          status: gptResult.analysis.status,
+          confidence_score: gptResult.analysis.confidence_score,
+          compliance_percentage: gptResult.analysis.compliance_percentage,
+          findings: gptResult.analysis,
+          diff_data: diffData,
+          summary: gptResult.analysis.summary,
+          recommendations: gptResult.analysis.recommendations || [],
+          raw_response: {
+            usage: gptResult.usage,
+            finish_reason: gptResult.finish_reason,
+            model: gptResult.model,
+          },
+        };
+
+        const { data: saved, error: saveError } = await supabase
+          .from('analysis_results')
+          .insert(analysisRecord)
+          .select()
+          .single();
+
+        if (saveError) {
+          console.error(`⚠️ [GroupByIds ${jobId}] DB save failed for ${ctrl.control_number}: ${saveError.message}`);
+        }
+
+        results.push({
+          analysis_id: saved?.id || null,
+          control_id: ctrl.id,
+          control_number: ctrl.control_number,
+          control_title: ctrl.title,
+          status: gptResult.analysis.status,
+          compliance_percentage: gptResult.analysis.compliance_percentage,
+          confidence_score: gptResult.analysis.confidence_score,
+          summary: gptResult.analysis.summary,
+          save_error: saveError?.message || null,
+        });
+
+        totalUsage.prompt_tokens += gptResult.usage?.prompt_tokens || 0;
+        totalUsage.completion_tokens += gptResult.usage?.completion_tokens || 0;
+        totalUsage.total_tokens += gptResult.usage?.total_tokens || 0;
+
+        console.log(`✅ [GroupByIds ${jobId}] ${ctrl.control_number}: ${gptResult.analysis.status} (${gptResult.analysis.compliance_percentage}%)`);
+      } catch (err) {
+        console.error(`❌ [GroupByIds ${jobId}] Error analyzing ${ctrl.control_number}: ${err.message}`);
+
+        // Rate limit retry
+        if (err.message && (err.message.includes('429') || err.message.toLowerCase().includes('rate limit'))) {
+          console.log(`⏳ [GroupByIds ${jobId}] Rate limited. Waiting 60s before retrying ${ctrl.control_number}...`);
+          if (job) job.progress = `Rate limited. Waiting 60s before retrying ${ctrl.control_number}...`;
+          await new Promise((resolve) => setTimeout(resolve, 60000));
+
+          try {
+            const requirementText = buildRequirementText(ctrl, ctrlFramework);
+            const gptResult = await analyzeEvidence(documentText, requirementText, controlName);
+            const diffData = generateDiff(gptResult.analysis, requirementText);
+
+            const analysisRecord = {
+              evidence_id: evidenceId,
+              control_id: ctrl.id,
+              project_id: evidence.project_id || null,
+              analyzed_at: new Date().toISOString(),
+              analysis_version: 'v1.0-group',
+              model_used: gptResult.model || 'gpt-4o',
+              status: gptResult.analysis.status,
+              confidence_score: gptResult.analysis.confidence_score,
+              compliance_percentage: gptResult.analysis.compliance_percentage,
+              findings: gptResult.analysis,
+              diff_data: diffData,
+              summary: gptResult.analysis.summary,
+              recommendations: gptResult.analysis.recommendations || [],
+              raw_response: {
+                usage: gptResult.usage,
+                finish_reason: gptResult.finish_reason,
+                model: gptResult.model,
+              },
+            };
+
+            const { data: saved, error: saveError } = await supabase
+              .from('analysis_results')
+              .insert(analysisRecord)
+              .select()
+              .single();
+
+            results.push({
+              analysis_id: saved?.id || null,
+              control_id: ctrl.id,
+              control_number: ctrl.control_number,
+              control_title: ctrl.title,
+              status: gptResult.analysis.status,
+              compliance_percentage: gptResult.analysis.compliance_percentage,
+              confidence_score: gptResult.analysis.confidence_score,
+              summary: gptResult.analysis.summary,
+              save_error: saveError?.message || null,
+            });
+
+            totalUsage.prompt_tokens += gptResult.usage?.prompt_tokens || 0;
+            totalUsage.completion_tokens += gptResult.usage?.completion_tokens || 0;
+            totalUsage.total_tokens += gptResult.usage?.total_tokens || 0;
+
+            console.log(`✅ [GroupByIds ${jobId}] Retry succeeded for ${ctrl.control_number}`);
+            continue;
+          } catch (retryErr) {
+            console.error(`❌ [GroupByIds ${jobId}] Retry also failed for ${ctrl.control_number}: ${retryErr.message}`);
+          }
+        }
+
+        // Record error result and continue to next control
+        results.push({
+          analysis_id: null,
+          control_id: ctrl.id,
+          control_number: ctrl.control_number,
+          control_title: ctrl.title,
+          status: 'error',
+          error: err.message,
+          compliance_percentage: null,
+          confidence_score: null,
+          summary: null,
+        });
+      }
+    }
+
+    // 6. Compute aggregate statistics
+    const aggregate = computeGroupAggregate(results);
+    const durationSeconds = Math.round((Date.now() - startTime) / 1000);
+
+    console.log(`\n🏁 [GroupByIds ${jobId}] Complete: ${results.length} controls analyzed in ${durationSeconds}s`);
+    console.log(`📊 [GroupByIds ${jobId}] Aggregate: ${aggregate.overall_status} (${aggregate.average_compliance_percentage}% avg)`);
+
+    // 7. Update job as completed
+    jobs.set(jobId, {
+      status: 'completed',
+      completedAt: Date.now(),
+      result: {
+        aggregate,
+        results,
+        evidence: {
+          id: evidenceId,
+          name: evidence.file_name,
+        },
+        metadata: {
+          total_tokens_used: totalUsage,
+          duration_seconds: durationSeconds,
+          analyzed_at: new Date().toISOString(),
+        },
+      },
+    });
+  } catch (err) {
+    console.error(`💥 [GroupByIds ${jobId}] Fatal error: ${err.message}`);
+    jobs.set(jobId, {
+      status: 'failed',
+      completedAt: Date.now(),
+      error: err.message,
+    });
+  } finally {
+    cleanupFile(tempFilePath);
+  }
+}
+
 module.exports = {
   buildRequirementText,
   computeGroupAggregate,
   runGroupAnalysis,
+  runGroupAnalysisByIds,
 };

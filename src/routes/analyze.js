@@ -5,7 +5,7 @@ const { supabase, downloadFile, cleanupFile } = require('../utils/supabase');
 const { parseDocument } = require('../services/documentParser');
 const { analyzeEvidence } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
-const { buildRequirementText, computeGroupAggregate, runGroupAnalysis } = require('../services/groupAnalysis');
+const { buildRequirementText, computeGroupAggregate, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 
 // ── In-memory job store for async group analysis ──
 const jobs = new Map();
@@ -564,6 +564,92 @@ router.get('/group/results/:parentControlId', async (req, res) => {
     console.error('❌ Group results error:', err.message);
     res.status(500).json({
       error: 'Failed to fetch group results',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+});
+
+// POST /api/analyze/group-by-ids/:evidenceId — Trigger group analysis with explicit control IDs
+// Used for category-grouped controls that don't have parent-child hierarchy
+router.post('/group-by-ids/:evidenceId', async (req, res) => {
+  try {
+    const { evidenceId } = req.params;
+    const { controlIds } = req.body;
+
+    if (!controlIds || !Array.isArray(controlIds) || controlIds.length === 0) {
+      return res.status(400).json({ error: 'controlIds must be a non-empty array of control UUIDs' });
+    }
+
+    console.log(`\n🔍 Starting GROUP-BY-IDS analysis for evidence: ${evidenceId}, ${controlIds.length} controls`);
+
+    // 1. Fetch evidence record (just need to verify it exists and has a file)
+    const { data: evidence, error: evidenceError } = await supabase
+      .from('evidence')
+      .select('*')
+      .eq('id', evidenceId)
+      .single();
+
+    if (evidenceError || !evidence) {
+      return res.status(404).json({ error: 'Evidence record not found', details: evidenceError?.message });
+    }
+
+    const filePath = evidence.file_path || evidence.storage_path;
+    if (!filePath) {
+      return res.status(400).json({ error: 'Evidence record has no file path' });
+    }
+
+    // 2. Fetch controls to validate they exist and get names for the response
+    const { data: controls, error: controlsError } = await supabase
+      .from('controls')
+      .select('id, control_number, title')
+      .in('id', controlIds)
+      .order('sort_order', { ascending: true });
+
+    if (controlsError) {
+      return res.status(500).json({ error: 'Failed to fetch controls', details: controlsError.message });
+    }
+
+    if (!controls || controls.length === 0) {
+      return res.status(400).json({ error: 'No valid controls found for the provided IDs' });
+    }
+
+    // 3. Create job and start async processing
+    const jobId = crypto.randomUUID();
+
+    jobs.set(jobId, {
+      status: 'processing',
+      startedAt: Date.now(),
+      progress: 'Initializing group analysis...',
+      controlsTotal: controls.length,
+      controlsCompleted: 0,
+    });
+
+    console.log(`📊 [GroupByIds ${jobId}] ${controls.length} controls to analyze`);
+
+    // Fire-and-forget
+    runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs).catch((err) => {
+      console.error(`💥 [GroupByIds ${jobId}] Unhandled error: ${err.message}`);
+      if (jobs.get(jobId)?.status === 'processing') {
+        jobs.set(jobId, {
+          status: 'failed',
+          completedAt: Date.now(),
+          error: `Unhandled error: ${err.message}`,
+        });
+      }
+    });
+
+    // 4. Return immediately with job info
+    return res.json({
+      success: true,
+      jobId,
+      status: 'processing',
+      controlCount: controls.length,
+      evidenceName: evidence.file_name,
+    });
+  } catch (err) {
+    console.error('❌ Group-by-IDs analysis start error:', err.message);
+    res.status(500).json({
+      error: 'Failed to start group analysis',
       details: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
