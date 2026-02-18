@@ -6,6 +6,8 @@ function generateDiff(analysisResult, requirementText) {
   const timelineView = generateTimelineView(requirements_breakdown);
   const statistics = calculateStatistics(requirements_breakdown, analysisResult);
 
+  const highlightRanges = generateHighlightRanges(requirements_breakdown);
+
   return {
     requirement_coverage: requirementCoverage,
     side_by_side: sideBySide,
@@ -13,6 +15,7 @@ function generateDiff(analysisResult, requirementText) {
     statistics,
     recommendations,
     critical_gaps,
+    highlight_ranges: highlightRanges,
     original_requirement: requirementText,
     generated_at: new Date().toISOString(),
   };
@@ -84,6 +87,19 @@ function calculateStatistics(breakdown, analysisResult) {
     confidence_score: analysisResult.confidence_score || 0,
     overall_status: analysisResult.status || 'pending',
   };
+}
+
+function generateHighlightRanges(breakdown) {
+  return breakdown
+    .filter(req => req.evidence_found && req.evidence_location && req.evidence_location.start_index >= 0)
+    .map(req => ({
+      startOffset: req.evidence_location.start_index,
+      endOffset: req.evidence_location.end_index,
+      requirementId: req.requirement_id,
+      status: req.status,
+      evidenceText: req.evidence_found,
+      sectionContext: req.evidence_location.section_context || null,
+    }));
 }
 
 function generateHtmlExport(diffData, metadata = {}) {

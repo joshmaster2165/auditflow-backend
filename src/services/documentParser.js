@@ -64,4 +64,51 @@ async function parseText(filePath) {
   return fs.readFileSync(filePath, 'utf-8');
 }
 
-module.exports = { parseDocument };
+/**
+ * Parse a document for the document viewer.
+ * Returns both HTML (for DOCX) and plain text (for all types).
+ * PDF files return html: null — the frontend renders PDFs via react-pdf.
+ *
+ * @param {string} filePath - Path to the downloaded temp file
+ * @param {string} mimeType - File MIME type
+ * @returns {{ html: string|null, text: string, fileType: string }}
+ */
+async function parseDocumentForViewer(filePath, mimeType) {
+  const type = SUPPORTED_TYPES[mimeType];
+  if (!type) {
+    throw new Error(
+      `Unsupported file type: ${mimeType}. Supported types: ${Object.keys(SUPPORTED_TYPES).join(', ')}`
+    );
+  }
+
+  let html = null;
+  let text = '';
+
+  switch (type) {
+    case 'docx': {
+      // Get both HTML (preserves formatting) and raw text (for highlight matching)
+      const htmlResult = await mammoth.convertToHtml({ path: filePath });
+      html = htmlResult.value;
+      const textResult = await mammoth.extractRawText({ path: filePath });
+      text = textResult.value;
+      break;
+    }
+    case 'pdf':
+      // html stays null — frontend uses react-pdf for real PDF rendering
+      text = await parsePdf(filePath);
+      break;
+    case 'text':
+      // html stays null — frontend renders plain text directly
+      text = await parseText(filePath);
+      break;
+  }
+
+  if (!text || text.trim().length === 0) {
+    throw new Error('No text content could be extracted from the document.');
+  }
+
+  console.log(`📄 Viewer parse: ${text.length} chars text${html ? `, ${html.length} chars HTML` : ''} (${type})`);
+  return { html, text: text.trim(), fileType: type };
+}
+
+module.exports = { parseDocument, parseDocumentForViewer };

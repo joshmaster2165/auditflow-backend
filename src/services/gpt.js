@@ -49,9 +49,10 @@ Your task is to analyze whether evidence documents satisfy specific compliance r
 
 1. Break down the requirement into its testable sub-requirements (as many or as few as appropriate for the requirement)
 2. For each sub-requirement, determine if it is met, partially met, or missing based on the evidence
-3. Quote specific evidence passages that support your findings
+3. Quote specific evidence passages that support your findings — copy text EXACTLY character-for-character from the document
 4. Identify gaps where evidence is insufficient
 5. Provide actionable recommendations
+6. For each evidence passage found, provide the exact character offset location within the document text to enable visual highlighting in the document viewer
 
 If the user provides custom analysis instructions, you MUST follow them. They take priority over default analysis behavior and may adjust what you focus on, how detailed your analysis is, or how you format your recommendations.
 
@@ -85,7 +86,12 @@ Return a JSON object with this structure. Adapt the depth and detail to what is 
       "requirement_id": "<short ID like REQ-1>",
       "requirement_text": "<the sub-requirement being tested>",
       "status": "met" | "partial" | "missing",
-      "evidence_found": "<relevant evidence passage or null if none>",
+      "evidence_found": "<EXACT verbatim quote copied character-for-character from the document, or null if none>",
+      "evidence_location": {
+        "start_index": <0-indexed character position where the evidence_found quote begins in the Evidence Document Content above>,
+        "end_index": <0-indexed character position where the quote ends>,
+        "section_context": "<heading or section name where this evidence appears, or null>"
+      },
       "gap_description": "<what is missing or null if fully met>",
       "confidence": <number 0.0-1.0>
     }
@@ -94,7 +100,11 @@ Return a JSON object with this structure. Adapt the depth and detail to what is 
   "critical_gaps": ["<critical finding>", ...]
 }
 
-Break the requirement into its natural sub-requirements — use as many or as few as the requirement warrants. Be precise about what evidence supports or contradicts each. Quote specific passages from the evidence document.`;
+CRITICAL for evidence_found: You MUST copy the exact text from the document character-for-character. Do NOT paraphrase, summarize, or modify the quote in any way. Include enough surrounding context (at least 1-2 full sentences) to make the highlighted passage meaningful in the document viewer.
+
+For evidence_location: Count the character position (0-indexed) where your quoted evidence_found text starts and ends within the "Evidence Document Content" section above. If you cannot determine the exact position, set start_index and end_index to -1 and section_context to null.
+
+Break the requirement into its natural sub-requirements — use as many or as few as the requirement warrants. Be precise about what evidence supports or contradicts each.`;
 }
 
 async function analyzeEvidence(documentText, requirementText, controlName, customInstructions) {
@@ -166,6 +176,7 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
       requirement_text: item.requirement_text || item.text || item.description || item.requirement || 'Sub-requirement',
       status: item.status || 'missing',
       evidence_found: item.evidence_found || item.evidence || item.evidence_text || null,
+      evidence_location: item.evidence_location || item.location || { start_index: -1, end_index: -1, section_context: null },
       gap_description: item.gap_description || item.gap || item.gaps || null,
       confidence: parseFloat(item.confidence || item.confidence_score || 0.5),
     }));

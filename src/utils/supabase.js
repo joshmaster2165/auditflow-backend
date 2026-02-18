@@ -103,9 +103,35 @@ function cleanupFile(filePath) {
   }
 }
 
+/**
+ * Generate a short-lived signed URL for a file in Supabase storage.
+ * Used by the document viewer to let the frontend load PDFs directly.
+ *
+ * @param {string} filePath - Path within the storage bucket
+ * @param {number} expiresIn - TTL in seconds (default 300 = 5 minutes)
+ * @returns {string|null} The signed URL, or null if generation failed
+ */
+async function getSignedUrl(filePath, expiresIn = 300) {
+  try {
+    const { data, error } = await supabase.storage
+      .from(storageBucket)
+      .createSignedUrl(filePath, expiresIn);
+
+    if (error) {
+      console.warn(`⚠️ Failed to create signed URL for ${filePath}: ${error.message}`);
+      return null;
+    }
+    return data.signedUrl;
+  } catch (err) {
+    console.warn(`⚠️ Signed URL generation error: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   supabase,
   testConnection,
   downloadFile,
   cleanupFile,
+  getSignedUrl,
 };

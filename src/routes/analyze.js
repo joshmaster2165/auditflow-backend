@@ -1,8 +1,9 @@
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
-const { supabase, downloadFile, cleanupFile } = require('../utils/supabase');
-const { parseDocument } = require('../services/documentParser');
+const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/supabase');
+const { parseDocument, parseDocumentForViewer } = require('../services/documentParser');
+const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
 const { analyzeEvidence } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
@@ -386,6 +387,151 @@ router.get('/export/:analysisId/html', async (req, res) => {
       error: 'Failed to generate export',
       details: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DOCUMENT VIEWER ENDPOINT
+// Returns everything the frontend needs to render the interactive document viewer
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GET /api/analyze/document-viewer/:analysisId — Serve document viewer data
+router.get('/document-viewer/:analysisId', async (req, res) => {
+  let tempFilePath = null;
+
+  try {
+    const { analysisId } = req.params;
+
+    // 1. Fetch analysis with joined evidence + control data
+    const { data: analysis, error: analysisError } = await supabase
+      .from('analysis_results')
+      .select(`
+        *,
+        evidence:evidence_id (
+          id, file_name, file_type, mime_type, file_path, storage_path
+        ),
+        controls:control_id (id, title, control_number)
+      `)
+      .eq('id', analysisId)
+      .single();
+
+    if (analysisError || !analysis) {
+      return res.status(404).json({ error: 'Analysis not found', details: analysisError?.message });
+    }
+
+    const evidence = analysis.evidence;
+    if (!evidence) {
+      return res.status(400).json({ error: 'Evidence record not found for this analysis' });
+    }
+
+    const filePath = evidence.file_path || evidence.storage_path;
+    if (!filePath) {
+      return res.status(400).json({ error: 'Evidence file path not available' });
+    }
+
+    const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
+
+    // 2. Check for cached viewer data in diff_data
+    let documentText = analysis.diff_data?.viewer_document_text || null;
+    let documentHtml = analysis.diff_data?.viewer_document_html || null;
+    let highlightRanges = analysis.diff_data?.viewer_highlight_ranges || null;
+
+    // 3. If not cached, generate on first view
+    if (!highlightRanges || !documentText) {
+      console.log(`📄 [Viewer] First view for analysis ${analysisId} — downloading and parsing document`);
+
+      tempFilePath = await downloadFile(filePath);
+      const parsed = await parseDocumentForViewer(tempFilePath, mimeType);
+
+      documentText = parsed.text;
+      documentHtml = parsed.html; // null for PDF/text
+
+      // Verify GPT's offsets and build highlight ranges
+      const breakdown = analysis.findings?.requirements_breakdown || [];
+      highlightRanges = verifyAndBuildHighlightRanges(documentText, breakdown);
+
+      console.log(`🎯 [Viewer] ${highlightRanges.length} highlight ranges matched (${highlightRanges.filter(r => r.matchQuality === 'exact').length} exact)`);
+
+      // Cache results back to diff_data (non-blocking)
+      supabase
+        .from('analysis_results')
+        .update({
+          diff_data: {
+            ...analysis.diff_data,
+            viewer_document_text: documentText,
+            viewer_document_html: documentHtml,
+            viewer_highlight_ranges: highlightRanges,
+          },
+        })
+        .eq('id', analysisId)
+        .then(({ error: updateError }) => {
+          if (updateError) {
+            console.warn(`⚠️ [Viewer] Failed to cache viewer data: ${updateError.message}`);
+          } else {
+            console.log(`💾 [Viewer] Cached viewer data for analysis ${analysisId}`);
+          }
+        });
+    }
+
+    // 4. Generate signed URL for PDF viewing
+    let signedUrl = null;
+    if (mimeType === 'application/pdf') {
+      signedUrl = await getSignedUrl(filePath, 300);
+    }
+
+    // 5. Determine file type for frontend
+    let fileType = 'text';
+    if (mimeType === 'application/pdf') {
+      fileType = 'pdf';
+    } else if (mimeType.includes('wordprocessingml') || mimeType.includes('docx')) {
+      fileType = 'docx';
+    }
+
+    // 6. Return viewer response
+    res.json({
+      success: true,
+      viewer: {
+        analysisId,
+        fileType,
+        signedUrl,
+        documentText,
+        documentHtml,
+        highlightRanges,
+      },
+      analysis: {
+        id: analysis.id,
+        status: analysis.status,
+        compliance_percentage: analysis.compliance_percentage,
+        confidence_score: analysis.confidence_score,
+        summary: analysis.summary,
+        findings: analysis.findings,
+        diff_data: {
+          requirement_coverage: analysis.diff_data?.requirement_coverage,
+          statistics: analysis.diff_data?.statistics,
+          side_by_side: analysis.diff_data?.side_by_side,
+          recommendations: analysis.diff_data?.recommendations,
+          critical_gaps: analysis.diff_data?.critical_gaps,
+        },
+      },
+      evidence: {
+        id: evidence.id,
+        fileName: evidence.file_name,
+        fileType: evidence.file_type,
+      },
+      control: analysis.controls ? {
+        id: analysis.controls.id,
+        title: analysis.controls.title,
+        controlNumber: analysis.controls.control_number,
+      } : null,
+    });
+  } catch (err) {
+    console.error('❌ Document viewer error:', err.message);
+    res.status(500).json({
+      error: 'Failed to load document viewer data',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  } finally {
+    cleanupFile(tempFilePath);
   }
 });
 
