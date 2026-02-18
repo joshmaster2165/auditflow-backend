@@ -73,6 +73,7 @@ router.post('/parse', upload.single('file'), async (req, res) => {
             chunkInfo: `This is part ${i + 1} of ${chunks.length} of the spreadsheet. Extract all controls found in this section.`,
           };
           const extraction = await extractControlsFromTabular(chunks[i], chunkContext);
+          chunks[i] = null; // Free chunk memory after processing
           allControls.push(...extraction.result.controls);
 
           if (i === 0) {
@@ -123,6 +124,7 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       if (needsChunking(parsed.text)) {
         chunked = true;
         const chunks = chunkText(parsed.text);
+        parsed.text = null; // Free the large text buffer — we have chunks now
         chunkCount = chunks.length;
         console.log(`📦 Document requires chunking: ${chunks.length} chunks`);
 
@@ -133,6 +135,7 @@ router.post('/parse', upload.single('file'), async (req, res) => {
             chunkInfo: `This is part ${i + 1} of ${chunks.length} of the document. Extract all controls found in this section.`,
           };
           const extraction = await extractFrameworkControls(chunks[i], chunkContext);
+          chunks[i] = null; // Free chunk memory after processing
           allControls.push(...extraction.result.controls);
 
           if (i === 0) {
@@ -165,6 +168,9 @@ router.post('/parse', upload.single('file'), async (req, res) => {
         });
 
         extractionNotes = `Document was processed in ${chunkCount} chunks. ${allControls.length} unique controls extracted.`;
+        if (parsed.truncated) {
+          extractionNotes += ` Note: Document was truncated from ${parsed.originalCharCount} to ${parsed.charCount} characters due to size limits. Some controls from later sections may be missing.`;
+        }
       } else {
         const extraction = await extractFrameworkControls(parsed.text, context);
         allControls = extraction.result.controls;
@@ -235,7 +241,7 @@ router.post('/parse', upload.single('file'), async (req, res) => {
 
     res.status(500).json({
       error: 'Failed to parse framework file',
-      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      details: err.message,
     });
   } finally {
     cleanupFile(filePath);

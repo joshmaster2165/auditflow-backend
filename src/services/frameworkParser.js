@@ -3,6 +3,9 @@ const path = require('path');
 const XLSX = require('xlsx');
 const pdfParse = require('pdf-parse');
 
+// Safety limit: ~125K tokens of input, covers ~200+ pages of dense text
+const MAX_PDF_CHARS = 500000;
+
 /**
  * Parse a framework file into a uniform intermediate format.
  *
@@ -97,13 +100,25 @@ async function parsePdfFile(filePath) {
     );
   }
 
-  console.log(`📄 Parsed PDF: ${data.numpages} pages, ${data.text.trim().length} characters`);
+  let text = data.text.trim();
+  let truncated = false;
+  const originalLength = text.length;
+
+  if (text.length > MAX_PDF_CHARS) {
+    console.warn(`⚠️ PDF text is ${text.length} chars — truncating to ${MAX_PDF_CHARS} chars to prevent memory issues`);
+    text = text.substring(0, MAX_PDF_CHARS);
+    truncated = true;
+  }
+
+  console.log(`📄 Parsed PDF: ${data.numpages} pages, ${originalLength} chars${truncated ? ` (truncated to ${MAX_PDF_CHARS})` : ''}`);
 
   return {
     type: 'document',
-    text: data.text.trim(),
+    text,
     pageCount: data.numpages,
-    charCount: data.text.trim().length,
+    charCount: text.length,
+    originalCharCount: originalLength,
+    truncated,
     metadata: {
       title: data.info?.Title || null,
       author: data.info?.Author || null,
