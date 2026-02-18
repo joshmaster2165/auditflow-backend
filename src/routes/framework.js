@@ -51,7 +51,7 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       workerData: { filePath, fileName, mimeType, body: req.body || {} },
       // Give the worker up to 3GB of its own heap space
       resourceLimits: {
-        maxOldGenerationSizeMb: 3072,
+        maxOldGenerationSizeMb: 4096,
       },
     });
 

@@ -91,8 +91,10 @@ function parseTabularFile(filePath) {
  * Parse PDF files and extract text content.
  */
 async function parsePdfFile(filePath) {
-  const dataBuffer = fs.readFileSync(filePath);
+  let dataBuffer = fs.readFileSync(filePath);
   const data = await pdfParse(dataBuffer);
+  // Free the raw file buffer immediately — pdf-parse has already extracted text
+  dataBuffer = null;
 
   if (!data.text || data.text.trim().length === 0) {
     throw new Error(

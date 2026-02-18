@@ -23,7 +23,9 @@ async function run() {
     const memStart = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
     console.log(`\n📄 [Worker] Parsing framework file: ${fileName} (${mimeType}) [${memStart}MB heap]`);
 
-    const parsed = await parseFrameworkFile(filePath, mimeType);
+    let parsed = await parseFrameworkFile(filePath, mimeType);
+    // Force GC after parse to reclaim pdf-parse internals
+    if (global.gc) global.gc();
     const memAfterParse = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
     console.log(`📊 [Worker] Parse complete [${memAfterParse}MB heap]`);
 
@@ -43,9 +45,11 @@ async function run() {
     let suggestedLayout = 'grouped';
     let suggestedGroupingField = 'category';
     let rawPreview = null;
+    let docInfo = null;
+    const parsedType = parsed.type;
 
     // ── Tabular path (CSV / XLSX) ──
-    if (parsed.type === 'tabular') {
+    if (parsedType === 'tabular') {
       console.log(`📊 [Worker] Tabular file: ${parsed.totalRows} rows, ${parsed.headers.length} columns`);
 
       rawPreview = {
@@ -126,13 +130,25 @@ async function run() {
     }
 
     // ── Document path (PDF) ──
-    if (parsed.type === 'document') {
+    if (parsedType === 'document') {
+      // Save metadata before nulling parsed object
+      docInfo = {
+        pageCount: parsed.pageCount,
+        charCount: parsed.charCount,
+        truncated: parsed.truncated,
+        originalCharCount: parsed.originalCharCount,
+      };
+
       if (needsChunking(parsed.text)) {
         chunked = true;
         const chunks = chunkText(parsed.text);
-        parsed.text = null;
+        // Free the entire parsed object — we only need chunks now
+        parsed = null;
+        if (global.gc) global.gc();
         chunkCount = chunks.length;
         console.log(`📦 [Worker] Document requires chunking: ${chunks.length} chunks`);
+        const memAfterChunk = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+        console.log(`🧹 [Worker] After freeing parsed text: ${memAfterChunk}MB heap`);
 
         for (let i = 0; i < chunks.length; i++) {
           console.log(`🔄 [Worker] Processing chunk ${i + 1}/${chunks.length}...`);
@@ -184,11 +200,13 @@ async function run() {
         });
 
         extractionNotes = `Document was processed in ${chunkCount} chunks. ${allControls.length} unique controls extracted.`;
-        if (parsed.truncated) {
-          extractionNotes += ` Note: Document was truncated from ${parsed.originalCharCount} to ${parsed.charCount} characters due to size limits. Some controls from later sections may be missing.`;
+        if (docInfo.truncated) {
+          extractionNotes += ` Note: Document was truncated from ${docInfo.originalCharCount} to ${docInfo.charCount} characters due to size limits. Some controls from later sections may be missing.`;
         }
       } else {
         const extraction = await extractFrameworkControls(parsed.text, context);
+        parsed = null; // Free parsed after extraction
+        if (global.gc) global.gc();
         allControls = extraction.result.controls;
         allGroups = extraction.result.groups || [];
         frameworkDetected = extraction.result.framework_detected || null;
@@ -233,10 +251,10 @@ async function run() {
       responseData.rawPreview = rawPreview;
     }
 
-    if (parsed.type === 'document') {
+    if (parsedType === 'document') {
       responseData.documentInfo = {
-        pageCount: parsed.pageCount,
-        charCount: parsed.charCount,
+        pageCount: docInfo.pageCount,
+        charCount: docInfo.charCount,
       };
     }
 
@@ -245,7 +263,7 @@ async function run() {
       type: 'completed',
       result: {
         success: true,
-        fileType: parsed.type === 'tabular' ? 'tabular' : 'document',
+        fileType: parsedType === 'tabular' ? 'tabular' : 'document',
         fileName,
         data: responseData,
       },
