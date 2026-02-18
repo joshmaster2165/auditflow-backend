@@ -1,255 +1,29 @@
 const express = require('express');
 const crypto = require('crypto');
+const path = require('path');
+const { Worker } = require('worker_threads');
 const router = express.Router();
 const { upload } = require('../middleware/upload');
-const { parseFrameworkFile, tabularToText } = require('../services/frameworkParser');
-const { extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls } = require('../services/gpt');
-const { cleanupFile } = require('../utils/supabase');
-const { chunkText, needsChunking } = require('../utils/chunker');
+const { enhanceFrameworkControls } = require('../services/gpt');
 
 // ── In-memory job store for async processing ──
+// Worker threads run in separate V8 heaps, so if they OOM the main process
+// stays alive and the job Map is preserved (job gets marked as 'failed').
 const jobs = new Map();
 
-// Clean up old jobs every 10 minutes (keep for 30 min after completion)
+// Clean up old jobs every 10 minutes
 setInterval(() => {
   const now = Date.now();
   for (const [id, job] of jobs) {
     if ((job.status === 'completed' || job.status === 'failed') && now - job.completedAt > 30 * 60 * 1000) {
       jobs.delete(id);
     } else if (job.status === 'processing' && now - job.startedAt > 15 * 60 * 1000) {
-      // Orphaned jobs older than 15 min
-      jobs.delete(id);
+      jobs.set(id, { ...job, status: 'failed', error: 'Processing timed out after 15 minutes', completedAt: Date.now() });
     }
   }
 }, 10 * 60 * 1000);
 
-// ── Background processing function ──
-async function processFrameworkFile(jobId, filePath, fileName, mimeType, body) {
-  try {
-    const memStart = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-    console.log(`\n📄 [Job ${jobId}] Parsing framework file: ${fileName} (${mimeType}) [${memStart}MB heap]`);
-
-    const parsed = await parseFrameworkFile(filePath, mimeType);
-    const memAfterParse = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-    console.log(`📊 [Job ${jobId}] Parse complete [${memAfterParse}MB heap]`);
-
-    const context = {
-      frameworkName: body.frameworkName || null,
-      frameworkVersion: body.frameworkVersion || null,
-    };
-
-    let allControls = [];
-    let allGroups = [];
-    let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-    let chunked = false;
-    let chunkCount = 1;
-    let frameworkDetected = null;
-    let versionDetected = null;
-    let extractionNotes = null;
-    let suggestedLayout = 'grouped';
-    let suggestedGroupingField = 'category';
-    let rawPreview = null;
-
-    // ── Tabular path (CSV / XLSX) ──
-    if (parsed.type === 'tabular') {
-      console.log(`📊 [Job ${jobId}] Tabular file: ${parsed.totalRows} rows, ${parsed.headers.length} columns`);
-
-      rawPreview = {
-        headers: parsed.headers,
-        sampleRows: parsed.rows.slice(0, 3),
-        totalRows: parsed.totalRows,
-      };
-
-      const textData = tabularToText(parsed.headers, parsed.rows);
-
-      if (needsChunking(textData)) {
-        chunked = true;
-        const chunks = chunkText(textData);
-        chunkCount = chunks.length;
-        console.log(`📦 [Job ${jobId}] Tabular data requires chunking: ${chunks.length} chunks`);
-
-        for (let i = 0; i < chunks.length; i++) {
-          console.log(`🔄 [Job ${jobId}] Processing chunk ${i + 1}/${chunks.length}...`);
-          jobs.get(jobId).progress = `Processing chunk ${i + 1} of ${chunks.length}`;
-          const chunkContext = {
-            ...context,
-            chunkInfo: `This is part ${i + 1} of ${chunks.length} of the spreadsheet. Extract all controls found in this section.`,
-          };
-          const extraction = await extractControlsFromTabular(chunks[i], chunkContext);
-          chunks[i] = null;
-          allControls.push(...extraction.result.controls);
-
-          if (i === 0) {
-            frameworkDetected = extraction.result.framework_detected || null;
-            versionDetected = extraction.result.version_detected || null;
-            suggestedLayout = extraction.result.suggested_layout || 'grouped';
-            suggestedGroupingField = extraction.result.suggested_grouping_field || 'category';
-            allGroups = extraction.result.groups || [];
-          } else {
-            const existingGroupNames = new Set(allGroups.map((g) => g.name));
-            (extraction.result.groups || []).forEach((g) => {
-              if (!existingGroupNames.has(g.name)) {
-                allGroups.push(g);
-                existingGroupNames.add(g.name);
-              }
-            });
-          }
-
-          totalUsage.prompt_tokens += extraction.usage?.prompt_tokens || 0;
-          totalUsage.completion_tokens += extraction.usage?.completion_tokens || 0;
-          totalUsage.total_tokens += extraction.usage?.total_tokens || 0;
-        }
-
-        const seen = new Map();
-        allControls = allControls.filter((c) => {
-          if (seen.has(c.control_number)) return false;
-          seen.set(c.control_number, true);
-          return true;
-        });
-
-        extractionNotes = `Spreadsheet was processed in ${chunkCount} chunks. ${allControls.length} unique controls extracted from ${parsed.totalRows} rows.`;
-      } else {
-        const extraction = await extractControlsFromTabular(textData, context);
-        allControls = extraction.result.controls;
-        allGroups = extraction.result.groups || [];
-        frameworkDetected = extraction.result.framework_detected || null;
-        versionDetected = extraction.result.version_detected || null;
-        extractionNotes = extraction.result.extraction_notes || null;
-        suggestedLayout = extraction.result.suggested_layout || 'grouped';
-        suggestedGroupingField = extraction.result.suggested_grouping_field || 'category';
-        totalUsage = extraction.usage || totalUsage;
-      }
-    }
-
-    // ── Document path (PDF) ──
-    if (parsed.type === 'document') {
-      if (needsChunking(parsed.text)) {
-        chunked = true;
-        const chunks = chunkText(parsed.text);
-        parsed.text = null;
-        chunkCount = chunks.length;
-        console.log(`📦 [Job ${jobId}] Document requires chunking: ${chunks.length} chunks`);
-
-        for (let i = 0; i < chunks.length; i++) {
-          console.log(`🔄 [Job ${jobId}] Processing chunk ${i + 1}/${chunks.length}...`);
-          jobs.get(jobId).progress = `Processing chunk ${i + 1} of ${chunks.length}`;
-          const chunkContext = {
-            ...context,
-            chunkInfo: `This is part ${i + 1} of ${chunks.length} of the document. Extract all controls found in this section.`,
-          };
-          const extraction = await extractFrameworkControls(chunks[i], chunkContext);
-          chunks[i] = null;
-          allControls.push(...extraction.result.controls);
-
-          if (i === 0) {
-            frameworkDetected = extraction.result.framework_detected || null;
-            versionDetected = extraction.result.version_detected || null;
-            suggestedLayout = extraction.result.suggested_layout || 'grouped';
-            suggestedGroupingField = extraction.result.suggested_grouping_field || 'category';
-            allGroups = extraction.result.groups || [];
-          } else {
-            const existingGroupNames = new Set(allGroups.map((g) => g.name));
-            (extraction.result.groups || []).forEach((g) => {
-              if (!existingGroupNames.has(g.name)) {
-                allGroups.push(g);
-                existingGroupNames.add(g.name);
-              }
-            });
-          }
-
-          totalUsage.prompt_tokens += extraction.usage?.prompt_tokens || 0;
-          totalUsage.completion_tokens += extraction.usage?.completion_tokens || 0;
-          totalUsage.total_tokens += extraction.usage?.total_tokens || 0;
-        }
-
-        const seen = new Map();
-        allControls = allControls.filter((c) => {
-          if (seen.has(c.control_number)) return false;
-          seen.set(c.control_number, true);
-          return true;
-        });
-
-        extractionNotes = `Document was processed in ${chunkCount} chunks. ${allControls.length} unique controls extracted.`;
-        if (parsed.truncated) {
-          extractionNotes += ` Note: Document was truncated from ${parsed.originalCharCount} to ${parsed.charCount} characters due to size limits. Some controls from later sections may be missing.`;
-        }
-      } else {
-        const extraction = await extractFrameworkControls(parsed.text, context);
-        allControls = extraction.result.controls;
-        allGroups = extraction.result.groups || [];
-        frameworkDetected = extraction.result.framework_detected || null;
-        versionDetected = extraction.result.version_detected || null;
-        extractionNotes = extraction.result.extraction_notes || null;
-        suggestedLayout = extraction.result.suggested_layout || 'grouped';
-        suggestedGroupingField = extraction.result.suggested_grouping_field || 'category';
-        totalUsage = extraction.usage || totalUsage;
-      }
-    }
-
-    // Normalize
-    allControls = allControls.map((c) => ({
-      ...c,
-      category: c.group || c.category || null,
-    }));
-
-    const categoriesFound = [...new Set(allControls.map((c) => c.category).filter(Boolean))];
-
-    const memEnd = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-    console.log(`✅ [Job ${jobId}] Framework extraction complete: ${allControls.length} controls, ${categoriesFound.length} categories, layout: ${suggestedLayout} [${memEnd}MB heap]`);
-
-    const responseData = {
-      controls: allControls,
-      groups: allGroups,
-      suggestedLayout,
-      suggestedGroupingField,
-      frameworkDetected,
-      versionDetected,
-      totalControls: allControls.length,
-      categoriesFound,
-      extractionNotes,
-      metadata: {
-        model: 'gpt-4o',
-        tokensUsed: totalUsage,
-        chunked,
-        chunkCount,
-      },
-    };
-
-    if (rawPreview) {
-      responseData.rawPreview = rawPreview;
-    }
-
-    if (parsed.type === 'document') {
-      responseData.documentInfo = {
-        pageCount: parsed.pageCount,
-        charCount: parsed.charCount,
-      };
-    }
-
-    // Store completed result
-    jobs.set(jobId, {
-      status: 'completed',
-      completedAt: Date.now(),
-      result: {
-        success: true,
-        fileType: parsed.type === 'tabular' ? 'tabular' : 'document',
-        fileName,
-        data: responseData,
-      },
-    });
-  } catch (err) {
-    console.error(`❌ [Job ${jobId}] Framework parse error:`, err.message);
-    jobs.set(jobId, {
-      status: 'failed',
-      completedAt: Date.now(),
-      error: err.message,
-    });
-  } finally {
-    cleanupFile(filePath);
-  }
-}
-
-// ── POST /api/framework/parse — Start async processing ──
+// ── POST /api/framework/parse — Start async processing in worker thread ──
 router.post('/parse', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -271,8 +45,61 @@ router.post('/parse', upload.single('file'), async (req, res) => {
 
     console.log(`📋 [Job ${jobId}] Started processing: ${fileName}`);
 
-    // Start processing in background (don't await)
-    processFrameworkFile(jobId, filePath, fileName, mimeType, req.body);
+    // Spawn worker thread — runs in its own V8 heap
+    const workerPath = path.join(__dirname, '..', 'workers', 'parseFramework.js');
+    const worker = new Worker(workerPath, {
+      workerData: { filePath, fileName, mimeType, body: req.body || {} },
+      // Give the worker up to 3GB of its own heap space
+      resourceLimits: {
+        maxOldGenerationSizeMb: 3072,
+      },
+    });
+
+    worker.on('message', (msg) => {
+      if (msg.type === 'progress') {
+        const job = jobs.get(jobId);
+        if (job) {
+          job.progress = msg.progress;
+        }
+      } else if (msg.type === 'completed') {
+        console.log(`✅ [Job ${jobId}] Worker completed successfully`);
+        jobs.set(jobId, {
+          status: 'completed',
+          completedAt: Date.now(),
+          result: msg.result,
+        });
+      } else if (msg.type === 'failed') {
+        console.error(`❌ [Job ${jobId}] Worker reported failure: ${msg.error}`);
+        jobs.set(jobId, {
+          status: 'failed',
+          completedAt: Date.now(),
+          error: msg.error,
+        });
+      }
+    });
+
+    worker.on('error', (err) => {
+      console.error(`❌ [Job ${jobId}] Worker crashed: ${err.message}`);
+      jobs.set(jobId, {
+        status: 'failed',
+        completedAt: Date.now(),
+        error: `Processing crashed: ${err.message}. The file may be too large or complex.`,
+      });
+    });
+
+    worker.on('exit', (code) => {
+      if (code !== 0) {
+        console.error(`❌ [Job ${jobId}] Worker exited with code ${code}`);
+        const job = jobs.get(jobId);
+        if (job && job.status === 'processing') {
+          jobs.set(jobId, {
+            status: 'failed',
+            completedAt: Date.now(),
+            error: `Processing failed unexpectedly (exit code ${code}). The file may be too large.`,
+          });
+        }
+      }
+    });
 
     // Return immediately with jobId
     return res.json({ jobId, status: 'processing', fileName });
