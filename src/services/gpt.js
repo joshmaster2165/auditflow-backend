@@ -25,7 +25,7 @@ function attemptJsonRecovery(truncatedContent) {
         console.log(`✅ JSON recovery succeeded with closing: "${closing}" (${parsed.controls.length} controls recovered)`);
         return parsed;
       }
-    } catch {
+    } catch (e) {
       // Try next closing pattern
     }
   }

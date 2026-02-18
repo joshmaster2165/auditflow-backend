@@ -11,8 +11,8 @@ const { chunkText, needsChunking } = require('../utils/chunker');
 // Returns unified response shape with controls, groups, suggestedLayout
 router.post('/parse', upload.single('file'), async (req, res) => {
   // Allow up to 5 minutes for GPT processing of large files
-  req.setTimeout(300000);
-  res.setTimeout(300000);
+  try { req.setTimeout(300000); } catch (e) { /* ignore if not supported */ }
+  try { res.setTimeout(300000); } catch (e) { /* ignore if not supported */ }
 
   let filePath = null;
 
