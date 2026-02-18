@@ -17,7 +17,6 @@
     "multer": "^2.0.2",
     "openai": "latest",
     "pdf-parse": "^1.1.1",
-    "pdfjs-dist": "^4.10.38",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

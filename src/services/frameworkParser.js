@@ -2,12 +2,10 @@ const fs = require('fs');
 const path = require('path');
 const XLSX = require('xlsx');
 
-// Use pdfjs-dist directly for page-by-page extraction (memory-safe)
-const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.mjs');
+const pdfParse = require('pdf-parse');
 
-// Safety limits
-const MAX_PDF_CHARS = 500000; // ~125K tokens, covers ~200+ pages of dense text
-const MAX_PDF_PAGES = 200;    // Hard cap on pages to parse
+// Safety limit: ~125K tokens of input, covers ~200+ pages of dense text
+const MAX_PDF_CHARS = 500000;
 
 /**
  * Parse a framework file into a uniform intermediate format.
@@ -90,71 +88,42 @@ function parseTabularFile(filePath) {
 }
 
 /**
- * Parse PDF files page-by-page using pdfjs-dist.
- * Unlike pdf-parse which loads ALL pages into memory at once,
- * this extracts text one page at a time and frees each page after use.
- * This keeps peak memory low enough for Railway's 512MB limit.
+ * Parse PDF files and extract text content.
  */
 async function parsePdfFile(filePath) {
   const dataBuffer = fs.readFileSync(filePath);
-  const uint8Array = new Uint8Array(dataBuffer);
+  const data = await pdfParse(dataBuffer);
 
-  const loadingTask = pdfjsLib.getDocument({
-    data: uint8Array,
-    useSystemFonts: true,
-  });
-  const pdf = await loadingTask.promise;
-  const totalPages = pdf.numPages;
-  const pagesToParse = Math.min(totalPages, MAX_PDF_PAGES);
-
-  console.log(`📄 PDF has ${totalPages} pages, parsing ${pagesToParse} page-by-page`);
-
-  let allText = '';
-
-  for (let i = 1; i <= pagesToParse; i++) {
-    const page = await pdf.getPage(i);
-    const textContent = await page.getTextContent();
-    const pageText = textContent.items.map(item => item.str).join(' ');
-    allText += pageText + '\n\n';
-    page.cleanup();
-
-    // Log progress every 25 pages
-    if (i % 25 === 0) {
-      const memMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-      console.log(`📄 Parsed ${i}/${pagesToParse} pages (${memMB}MB heap)`);
-    }
-  }
-
-  pdf.cleanup();
-
-  allText = allText.trim();
-
-  if (!allText || allText.length === 0) {
+  if (!data.text || data.text.trim().length === 0) {
     throw new Error(
       'No text content could be extracted from the PDF. It may be a scanned/image-based document. ' +
         'Please convert it to CSV or XLSX format and try again.'
     );
   }
 
+  let text = data.text.trim();
   let truncated = false;
-  const originalLength = allText.length;
+  const originalLength = text.length;
 
-  if (allText.length > MAX_PDF_CHARS) {
-    console.warn(`⚠️ PDF text is ${allText.length} chars — truncating to ${MAX_PDF_CHARS} chars`);
-    allText = allText.substring(0, MAX_PDF_CHARS);
+  if (text.length > MAX_PDF_CHARS) {
+    console.warn(`⚠️ PDF text is ${text.length} chars — truncating to ${MAX_PDF_CHARS} chars to prevent issues`);
+    text = text.substring(0, MAX_PDF_CHARS);
     truncated = true;
   }
 
-  console.log(`📄 Parsed PDF: ${totalPages} pages, ${originalLength} chars${truncated ? ` (truncated to ${MAX_PDF_CHARS})` : ''}`);
+  console.log(`📄 Parsed PDF: ${data.numpages} pages, ${originalLength} chars${truncated ? ` (truncated to ${MAX_PDF_CHARS})` : ''}`);
 
   return {
     type: 'document',
-    text: allText,
-    pageCount: totalPages,
-    charCount: allText.length,
+    text,
+    pageCount: data.numpages,
+    charCount: text.length,
     originalCharCount: originalLength,
     truncated,
-    metadata: { title: null, author: null },
+    metadata: {
+      title: data.info?.Title || null,
+      author: data.info?.Author || null,
+    },
   };
 }
 
