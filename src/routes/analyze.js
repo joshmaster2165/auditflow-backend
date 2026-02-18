@@ -433,6 +433,11 @@ router.post('/group/:evidenceId', async (req, res) => {
 
 // GET /api/analyze/group/status/:jobId — Poll group analysis status
 router.get('/group/status/:jobId', (req, res) => {
+  // Prevent browser caching so polling always gets fresh data
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('ETag', `"${Date.now()}"`);
+
   const job = jobs.get(req.params.jobId);
 
   if (!job) {
