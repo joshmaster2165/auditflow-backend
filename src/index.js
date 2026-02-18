@@ -12,7 +12,8 @@ const PORT = process.env.PORT || 3000;
 // CORS configuration - allow all origins for public API
 app.use(cors({
   origin: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
 }));
 
@@ -34,6 +35,14 @@ app.use('/api/framework', frameworkRoutes);
 
 // Global error handler (includes multer errors)
 app.use((err, req, res, next) => {
+  // Ensure CORS headers are present on ALL error responses
+  // (the cors middleware doesn't cover Express error handlers)
+  const origin = req.headers.origin;
+  if (origin) {
+    res.header('Access-Control-Allow-Origin', origin);
+    res.header('Access-Control-Allow-Credentials', 'true');
+  }
+
   // Handle multer-specific errors
   if (err.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({ error: 'File too large. Maximum size is 20MB.' });
