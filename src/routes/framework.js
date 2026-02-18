@@ -200,7 +200,7 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       categoriesFound,
       extractionNotes,
       metadata: {
-        model: 'gpt-4-turbo-preview',
+        model: 'gpt-4o',
         tokensUsed: totalUsage,
         chunked,
         chunkCount,
@@ -311,7 +311,7 @@ router.post('/enhance', async (req, res) => {
         controls: normalizedControls,
         summary: totalSummary,
         metadata: {
-          model: 'gpt-4-turbo-preview',
+          model: 'gpt-4o',
           tokensUsed: totalUsage,
         },
       },

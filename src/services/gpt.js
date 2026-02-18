@@ -95,7 +95,7 @@ async function analyzeEvidence(documentText, requirementText, controlName) {
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: buildUserPrompt(documentText, requirementText, controlName) },
@@ -238,7 +238,7 @@ async function extractFrameworkControls(documentText, context = {}) {
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: FRAMEWORK_EXTRACTION_PROMPT },
         { role: 'user', content: buildFrameworkExtractionPrompt(documentText, context) },
@@ -423,7 +423,7 @@ async function extractControlsFromTabular(textData, context = {}) {
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: TABULAR_EXTRACTION_PROMPT },
         { role: 'user', content: buildTabularExtractionPrompt(textData, context) },
@@ -577,7 +577,7 @@ async function enhanceFrameworkControls(controls, context = {}) {
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
+      model: 'gpt-4o',
       messages: [
         { role: 'system', content: FRAMEWORK_ENHANCE_PROMPT },
         { role: 'user', content: buildEnhancePrompt(controls, context) },
