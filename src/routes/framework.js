@@ -25,9 +25,12 @@ router.post('/parse', upload.single('file'), async (req, res) => {
     const fileName = req.file.originalname;
     const mimeType = req.file.mimetype;
 
-    console.log(`\n📄 Parsing framework file: ${fileName} (${mimeType})`);
+    const memStart = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+    console.log(`\n📄 Parsing framework file: ${fileName} (${mimeType}) [${memStart}MB heap]`);
 
     const parsed = await parseFrameworkFile(filePath, mimeType);
+    const memAfterParse = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+    console.log(`📊 Parse complete [${memAfterParse}MB heap]`);
 
     const context = {
       frameworkName: req.body.frameworkName || null,
@@ -192,7 +195,8 @@ router.post('/parse', upload.single('file'), async (req, res) => {
 
     const categoriesFound = [...new Set(allControls.map((c) => c.category).filter(Boolean))];
 
-    console.log(`✅ Framework extraction complete: ${allControls.length} controls, ${categoriesFound.length} categories, layout: ${suggestedLayout}`);
+    const memEnd = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+    console.log(`✅ Framework extraction complete: ${allControls.length} controls, ${categoriesFound.length} categories, layout: ${suggestedLayout} [${memEnd}MB heap]`);
 
     // Unified response shape for ALL file types
     const responseData = {

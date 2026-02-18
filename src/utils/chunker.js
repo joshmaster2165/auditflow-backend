@@ -6,7 +6,7 @@
  * Conservative chunk size: ~100K chars (~25K tokens input).
  */
 
-const MAX_CHARS_PER_CHUNK = 80000;
+const MAX_CHARS_PER_CHUNK = 50000;
 const OVERLAP_CHARS = 2000;
 
 /**
