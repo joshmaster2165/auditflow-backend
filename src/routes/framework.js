@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { upload } = require('../middleware/upload');
 const { parseFrameworkFile, tabularToText } = require('../services/frameworkParser');
@@ -6,35 +7,35 @@ const { extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkCo
 const { cleanupFile } = require('../utils/supabase');
 const { chunkText, needsChunking } = require('../utils/chunker');
 
-// POST /api/framework/parse — Upload and parse a framework file
-// ALL file types (CSV, XLSX, PDF) go through AI extraction
-// Returns unified response shape with controls, groups, suggestedLayout
-router.post('/parse', upload.single('file'), async (req, res) => {
-  // Allow up to 5 minutes for GPT processing of large files
-  try { req.setTimeout(300000); } catch (e) { /* ignore if not supported */ }
-  try { res.setTimeout(300000); } catch (e) { /* ignore if not supported */ }
+// ── In-memory job store for async processing ──
+const jobs = new Map();
 
-  let filePath = null;
-
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
+// Clean up old jobs every 10 minutes (keep for 30 min after completion)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, job] of jobs) {
+    if ((job.status === 'completed' || job.status === 'failed') && now - job.completedAt > 30 * 60 * 1000) {
+      jobs.delete(id);
+    } else if (job.status === 'processing' && now - job.startedAt > 15 * 60 * 1000) {
+      // Orphaned jobs older than 15 min
+      jobs.delete(id);
     }
+  }
+}, 10 * 60 * 1000);
 
-    filePath = req.file.path;
-    const fileName = req.file.originalname;
-    const mimeType = req.file.mimetype;
-
+// ── Background processing function ──
+async function processFrameworkFile(jobId, filePath, fileName, mimeType, body) {
+  try {
     const memStart = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-    console.log(`\n📄 Parsing framework file: ${fileName} (${mimeType}) [${memStart}MB heap]`);
+    console.log(`\n📄 [Job ${jobId}] Parsing framework file: ${fileName} (${mimeType}) [${memStart}MB heap]`);
 
     const parsed = await parseFrameworkFile(filePath, mimeType);
     const memAfterParse = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-    console.log(`📊 Parse complete [${memAfterParse}MB heap]`);
+    console.log(`📊 [Job ${jobId}] Parse complete [${memAfterParse}MB heap]`);
 
     const context = {
-      frameworkName: req.body.frameworkName || null,
-      frameworkVersion: req.body.frameworkVersion || null,
+      frameworkName: body.frameworkName || null,
+      frameworkVersion: body.frameworkVersion || null,
     };
 
     let allControls = [];
@@ -49,34 +50,33 @@ router.post('/parse', upload.single('file'), async (req, res) => {
     let suggestedGroupingField = 'category';
     let rawPreview = null;
 
-    // ── Tabular path (CSV / XLSX) — now goes through AI too ──
+    // ── Tabular path (CSV / XLSX) ──
     if (parsed.type === 'tabular') {
-      console.log(`📊 Tabular file: ${parsed.totalRows} rows, ${parsed.headers.length} columns`);
+      console.log(`📊 [Job ${jobId}] Tabular file: ${parsed.totalRows} rows, ${parsed.headers.length} columns`);
 
-      // Build raw preview for frontend transparency
       rawPreview = {
         headers: parsed.headers,
         sampleRows: parsed.rows.slice(0, 3),
         totalRows: parsed.totalRows,
       };
 
-      // Convert to text and send through AI
       const textData = tabularToText(parsed.headers, parsed.rows);
 
       if (needsChunking(textData)) {
         chunked = true;
         const chunks = chunkText(textData);
         chunkCount = chunks.length;
-        console.log(`📦 Tabular data requires chunking: ${chunks.length} chunks`);
+        console.log(`📦 [Job ${jobId}] Tabular data requires chunking: ${chunks.length} chunks`);
 
         for (let i = 0; i < chunks.length; i++) {
-          console.log(`🔄 Processing chunk ${i + 1}/${chunks.length}...`);
+          console.log(`🔄 [Job ${jobId}] Processing chunk ${i + 1}/${chunks.length}...`);
+          jobs.get(jobId).progress = `Processing chunk ${i + 1} of ${chunks.length}`;
           const chunkContext = {
             ...context,
             chunkInfo: `This is part ${i + 1} of ${chunks.length} of the spreadsheet. Extract all controls found in this section.`,
           };
           const extraction = await extractControlsFromTabular(chunks[i], chunkContext);
-          chunks[i] = null; // Free chunk memory after processing
+          chunks[i] = null;
           allControls.push(...extraction.result.controls);
 
           if (i === 0) {
@@ -100,7 +100,6 @@ router.post('/parse', upload.single('file'), async (req, res) => {
           totalUsage.total_tokens += extraction.usage?.total_tokens || 0;
         }
 
-        // Deduplicate by control_number
         const seen = new Map();
         allControls = allControls.filter((c) => {
           if (seen.has(c.control_number)) return false;
@@ -127,18 +126,19 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       if (needsChunking(parsed.text)) {
         chunked = true;
         const chunks = chunkText(parsed.text);
-        parsed.text = null; // Free the large text buffer — we have chunks now
+        parsed.text = null;
         chunkCount = chunks.length;
-        console.log(`📦 Document requires chunking: ${chunks.length} chunks`);
+        console.log(`📦 [Job ${jobId}] Document requires chunking: ${chunks.length} chunks`);
 
         for (let i = 0; i < chunks.length; i++) {
-          console.log(`🔄 Processing chunk ${i + 1}/${chunks.length}...`);
+          console.log(`🔄 [Job ${jobId}] Processing chunk ${i + 1}/${chunks.length}...`);
+          jobs.get(jobId).progress = `Processing chunk ${i + 1} of ${chunks.length}`;
           const chunkContext = {
             ...context,
             chunkInfo: `This is part ${i + 1} of ${chunks.length} of the document. Extract all controls found in this section.`,
           };
           const extraction = await extractFrameworkControls(chunks[i], chunkContext);
-          chunks[i] = null; // Free chunk memory after processing
+          chunks[i] = null;
           allControls.push(...extraction.result.controls);
 
           if (i === 0) {
@@ -162,7 +162,6 @@ router.post('/parse', upload.single('file'), async (req, res) => {
           totalUsage.total_tokens += extraction.usage?.total_tokens || 0;
         }
 
-        // Deduplicate by control_number
         const seen = new Map();
         allControls = allControls.filter((c) => {
           if (seen.has(c.control_number)) return false;
@@ -187,7 +186,7 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       }
     }
 
-    // Normalize: map "group" field to "category" for frontend consistency
+    // Normalize
     allControls = allControls.map((c) => ({
       ...c,
       category: c.group || c.category || null,
@@ -196,9 +195,8 @@ router.post('/parse', upload.single('file'), async (req, res) => {
     const categoriesFound = [...new Set(allControls.map((c) => c.category).filter(Boolean))];
 
     const memEnd = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-    console.log(`✅ Framework extraction complete: ${allControls.length} controls, ${categoriesFound.length} categories, layout: ${suggestedLayout} [${memEnd}MB heap]`);
+    console.log(`✅ [Job ${jobId}] Framework extraction complete: ${allControls.length} controls, ${categoriesFound.length} categories, layout: ${suggestedLayout} [${memEnd}MB heap]`);
 
-    // Unified response shape for ALL file types
     const responseData = {
       controls: allControls,
       groups: allGroups,
@@ -217,12 +215,10 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       },
     };
 
-    // Include raw preview for tabular files
     if (rawPreview) {
       responseData.rawPreview = rawPreview;
     }
 
-    // Include document info for PDFs
     if (parsed.type === 'document') {
       responseData.documentInfo = {
         pageCount: parsed.pageCount,
@@ -230,25 +226,94 @@ router.post('/parse', upload.single('file'), async (req, res) => {
       };
     }
 
-    return res.json({
-      success: true,
-      fileType: parsed.type === 'tabular' ? 'tabular' : 'document',
-      fileName,
-      data: responseData,
+    // Store completed result
+    jobs.set(jobId, {
+      status: 'completed',
+      completedAt: Date.now(),
+      result: {
+        success: true,
+        fileType: parsed.type === 'tabular' ? 'tabular' : 'document',
+        fileName,
+        data: responseData,
+      },
     });
   } catch (err) {
-    console.error('❌ Framework parse error:', err.message);
-
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ error: 'File too large. Maximum size is 20MB.' });
-    }
-
-    res.status(500).json({
-      error: 'Failed to parse framework file',
-      details: err.message,
+    console.error(`❌ [Job ${jobId}] Framework parse error:`, err.message);
+    jobs.set(jobId, {
+      status: 'failed',
+      completedAt: Date.now(),
+      error: err.message,
     });
   } finally {
     cleanupFile(filePath);
+  }
+}
+
+// ── POST /api/framework/parse — Start async processing ──
+router.post('/parse', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const jobId = crypto.randomUUID();
+    const filePath = req.file.path;
+    const fileName = req.file.originalname;
+    const mimeType = req.file.mimetype;
+
+    // Store job as processing
+    jobs.set(jobId, {
+      status: 'processing',
+      startedAt: Date.now(),
+      fileName,
+      progress: 'Parsing file...',
+    });
+
+    console.log(`📋 [Job ${jobId}] Started processing: ${fileName}`);
+
+    // Start processing in background (don't await)
+    processFrameworkFile(jobId, filePath, fileName, mimeType, req.body);
+
+    // Return immediately with jobId
+    return res.json({ jobId, status: 'processing', fileName });
+  } catch (err) {
+    console.error('❌ Framework parse start error:', err.message);
+    res.status(500).json({
+      error: 'Failed to start framework file processing',
+      details: err.message,
+    });
+  }
+});
+
+// ── GET /api/framework/parse/status/:jobId — Poll for result ──
+router.get('/parse/status/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found or expired' });
+  }
+
+  if (job.status === 'processing') {
+    return res.json({
+      status: 'processing',
+      fileName: job.fileName,
+      progress: job.progress || 'Processing...',
+      elapsed: Math.round((Date.now() - job.startedAt) / 1000),
+    });
+  }
+
+  if (job.status === 'completed') {
+    return res.json({
+      status: 'completed',
+      ...job.result,
+    });
+  }
+
+  if (job.status === 'failed') {
+    return res.json({
+      status: 'failed',
+      error: job.error,
+    });
   }
 });
 
