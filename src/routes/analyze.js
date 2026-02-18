@@ -432,12 +432,14 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
     const mimeType = evidence.file_type || 'text/plain';
 
     // 2. Check for cached viewer data in diff_data
+    //    Re-compute if highlightRanges is empty (may have been cached before fuzzy matching was added)
     let documentText = analysis.diff_data?.viewer_document_text || null;
     let documentHtml = analysis.diff_data?.viewer_document_html || null;
     let highlightRanges = analysis.diff_data?.viewer_highlight_ranges || null;
+    const hasValidCache = documentText && highlightRanges && highlightRanges.length > 0;
 
-    // 3. If not cached, generate on first view
-    if (!highlightRanges || !documentText) {
+    // 3. If not cached or cache had zero highlights, regenerate
+    if (!hasValidCache) {
       console.log(`📄 [Viewer] First view for analysis ${analysisId} — downloading and parsing document`);
 
       tempFilePath = await downloadFile(filePath);

@@ -1,9 +1,9 @@
 /**
- * Lightweight offset verifier for GPT evidence passage locations.
+ * Evidence passage matcher for document viewer highlights.
  *
- * GPT provides character offsets for its evidence_found quotes. This module
- * verifies those offsets are accurate and falls back to simple string search
- * if they're not. No complex fuzzy matching — GPT does the heavy lifting.
+ * For new analyses: GPT provides character offsets — we verify them.
+ * For old analyses: GPT paraphrased quotes — we use fuzzy word-token matching.
+ * Four tiers: exact offset → indexOf → whitespace-normalized → fuzzy sliding window.
  */
 
 /**
@@ -16,15 +16,11 @@ function normalizeWs(str) {
 /**
  * Map a character offset in the normalized (whitespace-collapsed) string
  * back to the corresponding offset in the original string.
- *
- * Walks the original string tracking how many normalized characters have
- * been consumed, then returns the original-string index.
  */
 function mapNormalizedOffset(original, normOffset) {
   let normPos = 0;
   let inWhitespace = false;
 
-  // Skip leading whitespace in original (matches trim behavior)
   let start = 0;
   while (start < original.length && /\s/.test(original[start])) {
     start++;
@@ -35,10 +31,9 @@ function mapNormalizedOffset(original, normOffset) {
 
     if (/\s/.test(original[i])) {
       if (!inWhitespace) {
-        normPos++; // Collapsed whitespace = 1 char in normalized
+        normPos++;
         inWhitespace = true;
       }
-      // Skip additional whitespace chars
     } else {
       normPos++;
       inWhitespace = false;
@@ -49,13 +44,117 @@ function mapNormalizedOffset(original, normOffset) {
 }
 
 /**
+ * Extract word tokens from text (lowercase, alphanumeric only).
+ */
+function tokenize(text) {
+  return text.toLowerCase().match(/[a-z0-9]+/g) || [];
+}
+
+/**
+ * Compute Jaccard similarity between two sets of word tokens.
+ * Returns a number between 0 and 1.
+ */
+function jaccardSimilarity(tokensA, tokensB) {
+  const setA = new Set(tokensA);
+  const setB = new Set(tokensB);
+  let intersection = 0;
+  for (const t of setA) {
+    if (setB.has(t)) intersection++;
+  }
+  const union = setA.size + setB.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+/**
+ * Fuzzy sliding window match — finds the best-matching region in the document
+ * for a given evidence quote using word-token Jaccard similarity.
+ *
+ * Strategy: find the 2-3 rarest words from the quote, locate them in the
+ * document to narrow the search area, then score windows near those anchors.
+ */
+function fuzzyMatch(documentText, quote) {
+  const quoteTokens = tokenize(quote);
+  if (quoteTokens.length < 3) return null; // Too short for fuzzy matching
+
+  const docLower = documentText.toLowerCase();
+
+  // Find anchor words: longest tokens that appear in the document (rare = distinctive)
+  const anchorCandidates = [...new Set(quoteTokens)]
+    .filter(t => t.length >= 4)
+    .sort((a, b) => b.length - a.length)
+    .slice(0, 5);
+
+  // Find positions of anchor words in the document
+  const anchorPositions = [];
+  for (const anchor of anchorCandidates) {
+    let searchFrom = 0;
+    while (searchFrom < docLower.length) {
+      const idx = docLower.indexOf(anchor, searchFrom);
+      if (idx === -1) break;
+      anchorPositions.push(idx);
+      searchFrom = idx + anchor.length;
+    }
+  }
+
+  if (anchorPositions.length === 0) return null;
+
+  // Deduplicate and sort anchor positions
+  const uniqueAnchors = [...new Set(anchorPositions)].sort((a, b) => a - b);
+
+  // For each anchor position, try a window around it
+  const windowSize = Math.max(quote.length * 2, 200);
+  let bestScore = 0;
+  let bestStart = -1;
+  let bestEnd = -1;
+
+  for (const anchorPos of uniqueAnchors) {
+    const windowStart = Math.max(0, anchorPos - windowSize);
+    const windowEnd = Math.min(documentText.length, anchorPos + windowSize);
+    const windowText = documentText.substring(windowStart, windowEnd);
+
+    // Try different-sized slices within this window
+    const minLen = Math.floor(quote.length * 0.5);
+    const maxLen = Math.floor(quote.length * 2.0);
+    const step = Math.max(20, Math.floor(quote.length * 0.15));
+
+    for (let len = minLen; len <= maxLen; len += step) {
+      for (let offset = 0; offset + len <= windowText.length; offset += step) {
+        const slice = windowText.substring(offset, offset + len);
+        const sliceTokens = tokenize(slice);
+        const score = jaccardSimilarity(quoteTokens, sliceTokens);
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestStart = windowStart + offset;
+          bestEnd = windowStart + offset + len;
+        }
+      }
+    }
+  }
+
+  // Only accept if similarity is decent (0.4 = 40% word overlap)
+  if (bestScore >= 0.4 && bestStart >= 0) {
+    // Snap to paragraph boundaries for cleaner highlights
+    const paraStart = documentText.lastIndexOf('\n', bestStart);
+    const paraEnd = documentText.indexOf('\n', bestEnd);
+    return {
+      startOffset: paraStart >= 0 ? paraStart + 1 : bestStart,
+      endOffset: paraEnd >= 0 ? paraEnd : bestEnd,
+      score: bestScore,
+    };
+  }
+
+  return null;
+}
+
+/**
  * Verify GPT's claimed offsets and build highlight ranges.
  *
  * Strategy:
- * 1. Check if text at GPT's offsets matches the quote (fast path)
+ * 1. Check if text at GPT's offsets matches the quote (fast path — new analyses)
  * 2. Fall back to indexOf on original text
  * 3. Fall back to indexOf with whitespace normalization
- * 4. Give up and mark as 'unmatched'
+ * 4. Fall back to fuzzy sliding window match (handles paraphrased old analyses)
  *
  * @param {string} documentText - The full extracted document text
  * @param {Array} requirementsBreakdown - GPT's requirements_breakdown array
@@ -82,12 +181,10 @@ function verifyAndBuildHighlightRanges(documentText, requirementsBreakdown) {
     if (loc.start_index >= 0 && loc.end_index > loc.start_index && loc.end_index <= documentText.length) {
       const slice = documentText.substring(loc.start_index, loc.end_index);
       if (slice === quote) {
-        // Perfect match
         startOffset = loc.start_index;
         endOffset = loc.end_index;
         matchQuality = 'exact';
       } else if (normalizeWs(slice) === normalizeWs(quote)) {
-        // Match with whitespace differences
         startOffset = loc.start_index;
         endOffset = loc.end_index;
         matchQuality = 'exact';
@@ -115,6 +212,16 @@ function verifyAndBuildHighlightRanges(documentText, requirementsBreakdown) {
           endOffset = mapNormalizedOffset(documentText, idx + normQuote.length);
           matchQuality = 'normalized';
         }
+      }
+    }
+
+    // Tier 4: Fuzzy sliding window match (for old analyses where GPT paraphrased)
+    if (matchQuality === 'unmatched') {
+      const fuzzyResult = fuzzyMatch(documentText, quote);
+      if (fuzzyResult) {
+        startOffset = fuzzyResult.startOffset;
+        endOffset = fuzzyResult.endOffset;
+        matchQuality = 'approximate';
       }
     }
 
