@@ -581,6 +581,7 @@ router.post('/group-by-ids/:evidenceId', async (req, res) => {
     }
 
     console.log(`\n🔍 Starting GROUP-BY-IDS analysis for evidence: ${evidenceId}, ${controlIds.length} controls`);
+    console.log(`📋 [GroupByIds] Received controlIds:`, JSON.stringify(controlIds));
 
     // 1. Fetch evidence record (just need to verify it exists and has a file)
     const { data: evidence, error: evidenceError } = await supabase
@@ -599,18 +600,25 @@ router.post('/group-by-ids/:evidenceId', async (req, res) => {
     }
 
     // 2. Fetch controls to validate they exist and get names for the response
+    console.log(`📋 [GroupByIds] Querying controls table with .in('id', ...) for ${controlIds.length} IDs`);
     const { data: controls, error: controlsError } = await supabase
       .from('controls')
       .select('id, control_number, title')
       .in('id', controlIds)
       .order('sort_order', { ascending: true });
 
+    console.log(`📋 [GroupByIds] Query result: ${controls?.length || 0} controls found, error: ${controlsError?.message || 'none'}`);
+
     if (controlsError) {
-      return res.status(500).json({ error: 'Failed to fetch controls', details: controlsError.message });
+      return res.status(500).json({ error: 'Failed to fetch controls', details: controlsError.message, receivedIds: controlIds });
     }
 
     if (!controls || controls.length === 0) {
-      return res.status(400).json({ error: 'No valid controls found for the provided IDs' });
+      return res.status(400).json({
+        error: 'No valid controls found for the provided IDs',
+        receivedIds: controlIds,
+        hint: 'Ensure controlIds are UUID primary keys from the controls table id column',
+      });
     }
 
     // 3. Create job and start async processing
