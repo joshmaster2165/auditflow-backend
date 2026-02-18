@@ -1,9 +1,26 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { supabase, downloadFile, cleanupFile } = require('../utils/supabase');
 const { parseDocument } = require('../services/documentParser');
 const { analyzeEvidence } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
+const { buildRequirementText, computeGroupAggregate, runGroupAnalysis } = require('../services/groupAnalysis');
+
+// ── In-memory job store for async group analysis ──
+const jobs = new Map();
+
+// Clean up old jobs every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, job] of jobs) {
+    if ((job.status === 'completed' || job.status === 'failed') && now - job.completedAt > 30 * 60 * 1000) {
+      jobs.delete(id);
+    } else if (job.status === 'processing' && now - job.startedAt > 20 * 60 * 1000) {
+      jobs.set(id, { ...job, status: 'failed', error: 'Group analysis timed out after 20 minutes', completedAt: Date.now() });
+    }
+  }
+}, 10 * 60 * 1000);
 
 // POST /api/analyze/evidence/:evidenceId - Full analysis pipeline
 router.post('/evidence/:evidenceId', async (req, res) => {
@@ -91,36 +108,10 @@ router.post('/evidence/:evidenceId', async (req, res) => {
 
     const controlName = control.title || 'Unknown Control';
     const controlNumber = control.control_number || '';
-    const controlCategory = control.category || '';
     const frameworkName = control.frameworks?.name || '';
 
-    // Description is the PRIMARY requirement — it contains the real compliance language
-    let requirementText = control.description || control.custom_fields?.requirement_text || null;
-
-    // If no description, build a structured requirement from all available fields
-    if (!requirementText && control.title) {
-      console.warn(`⚠️ Control "${controlName}" has no description — building requirement from metadata`);
-      const parts = [];
-      if (frameworkName) parts.push(`Framework: ${frameworkName}`);
-      if (controlNumber) parts.push(`Control: ${controlNumber}`);
-      parts.push(`Requirement: ${control.title}`);
-      if (controlCategory) parts.push(`Domain: ${controlCategory}`);
-
-      requirementText = `Evaluate whether the evidence demonstrates compliance with the following requirement.\n\n${parts.join('\n')}\n\nAnalyze the evidence document for any content that addresses "${control.title}". Assess whether organizational policies, procedures, or controls described in the evidence satisfy this requirement.`;
-    } else if (requirementText) {
-      // Even when we have description, enrich it with framework/control context
-      const contextParts = [];
-      if (frameworkName) contextParts.push(`Framework: ${frameworkName}`);
-      if (controlNumber) contextParts.push(`Control: ${controlNumber}`);
-      if (controlName) contextParts.push(`Title: ${controlName}`);
-      if (controlCategory) contextParts.push(`Domain: ${controlCategory}`);
-
-      if (contextParts.length > 0) {
-        requirementText = `${contextParts.join(' | ')}\n\nRequirement:\n${requirementText}`;
-      }
-    }
-
-    requirementText = requirementText || 'No specific requirement text provided';
+    // Build enriched requirement text using shared helper
+    const requirementText = buildRequirementText(control, control.frameworks);
 
     console.log(`📐 Control: ${controlName} (${controlNumber})`);
     console.log(`🏛️ Framework: ${frameworkName || 'none'}`);
@@ -336,6 +327,243 @@ router.get('/export/:analysisId/html', async (req, res) => {
     console.error('❌ Export error:', err.message);
     res.status(500).json({
       error: 'Failed to generate export',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GROUP ANALYSIS ENDPOINTS
+// Analyze evidence against all child controls of a parent control
+// ══════════════════════════════════════════════════════════════════════════════
+
+// POST /api/analyze/group/:evidenceId — Trigger group analysis
+router.post('/group/:evidenceId', async (req, res) => {
+  try {
+    const { evidenceId } = req.params;
+    console.log(`\n🔍 Starting GROUP analysis for evidence: ${evidenceId}`);
+
+    // 1. Fetch evidence to get the parent control
+    const { data: evidence, error: evidenceError } = await supabase
+      .from('evidence')
+      .select(`
+        *,
+        controls:control_id (
+          *,
+          frameworks:framework_id (*)
+        )
+      `)
+      .eq('id', evidenceId)
+      .single();
+
+    if (evidenceError || !evidence) {
+      return res.status(404).json({ error: 'Evidence record not found', details: evidenceError?.message });
+    }
+
+    const parentControl = evidence.controls;
+    if (!parentControl) {
+      return res.status(400).json({ error: 'Evidence has no linked control. Attach evidence to a parent control first.' });
+    }
+
+    // 2. Verify the parent has child controls
+    const { data: childControls, error: childError } = await supabase
+      .from('controls')
+      .select('id, control_number, title')
+      .eq('framework_id', parentControl.framework_id)
+      .eq('parent_control_number', parentControl.control_number)
+      .order('sort_order', { ascending: true });
+
+    if (childError) {
+      return res.status(500).json({ error: 'Failed to fetch child controls', details: childError.message });
+    }
+
+    if (!childControls || childControls.length === 0) {
+      return res.status(400).json({
+        error: `No child controls found under ${parentControl.control_number} (${parentControl.title}). This control may not be a parent, or child controls may not have parent_control_number set.`,
+      });
+    }
+
+    // 3. Create job and start async processing
+    const jobId = crypto.randomUUID();
+
+    jobs.set(jobId, {
+      status: 'processing',
+      startedAt: Date.now(),
+      progress: 'Initializing group analysis...',
+      controlsTotal: childControls.length,
+      controlsCompleted: 0,
+    });
+
+    console.log(`📋 [Group ${jobId}] Parent: ${parentControl.control_number} - ${parentControl.title}`);
+    console.log(`📊 [Group ${jobId}] ${childControls.length} child controls to analyze`);
+
+    // Fire-and-forget — runGroupAnalysis updates the job Map on progress/completion/failure
+    runGroupAnalysis(jobId, evidenceId, jobs).catch((err) => {
+      console.error(`💥 [Group ${jobId}] Unhandled error: ${err.message}`);
+      if (jobs.get(jobId)?.status === 'processing') {
+        jobs.set(jobId, {
+          status: 'failed',
+          completedAt: Date.now(),
+          error: `Unhandled error: ${err.message}`,
+        });
+      }
+    });
+
+    // 4. Return immediately with job info
+    return res.json({
+      success: true,
+      jobId,
+      status: 'processing',
+      parentControl: {
+        id: parentControl.id,
+        control_number: parentControl.control_number,
+        title: parentControl.title,
+      },
+      childControls: childControls.length,
+      evidenceName: evidence.file_name,
+    });
+  } catch (err) {
+    console.error('❌ Group analysis start error:', err.message);
+    res.status(500).json({
+      error: 'Failed to start group analysis',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+});
+
+// GET /api/analyze/group/status/:jobId — Poll group analysis status
+router.get('/group/status/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found or expired' });
+  }
+
+  if (job.status === 'processing') {
+    return res.json({
+      status: 'processing',
+      progress: job.progress || 'Processing...',
+      controlsCompleted: job.controlsCompleted || 0,
+      controlsTotal: job.controlsTotal || 0,
+      elapsed: Math.round((Date.now() - job.startedAt) / 1000),
+    });
+  }
+
+  if (job.status === 'completed') {
+    return res.json({
+      status: 'completed',
+      ...job.result,
+    });
+  }
+
+  if (job.status === 'failed') {
+    return res.json({
+      status: 'failed',
+      error: job.error,
+    });
+  }
+});
+
+// GET /api/analyze/group/results/:parentControlId — Fetch stored group results
+router.get('/group/results/:parentControlId', async (req, res) => {
+  try {
+    const { parentControlId } = req.params;
+
+    // 1. Get the parent control
+    const { data: parentControl, error: parentError } = await supabase
+      .from('controls')
+      .select('*, frameworks:framework_id (*)')
+      .eq('id', parentControlId)
+      .single();
+
+    if (parentError || !parentControl) {
+      return res.status(404).json({ error: 'Parent control not found', details: parentError?.message });
+    }
+
+    // 2. Find all child control IDs
+    const { data: childControls, error: childError } = await supabase
+      .from('controls')
+      .select('id, control_number, title')
+      .eq('framework_id', parentControl.framework_id)
+      .eq('parent_control_number', parentControl.control_number)
+      .order('sort_order', { ascending: true });
+
+    if (childError || !childControls || childControls.length === 0) {
+      return res.status(404).json({ error: 'No child controls found under this parent' });
+    }
+
+    const childIds = childControls.map((c) => c.id);
+
+    // 3. Fetch all analysis results for these child controls (latest per control)
+    const { data: analyses, error: analysisError } = await supabase
+      .from('analysis_results')
+      .select(`
+        *,
+        evidence:evidence_id (id, file_name),
+        controls:control_id (id, title, control_number)
+      `)
+      .in('control_id', childIds)
+      .order('analyzed_at', { ascending: false });
+
+    if (analysisError) {
+      return res.status(500).json({ error: 'Failed to fetch analysis results', details: analysisError.message });
+    }
+
+    if (!analyses || analyses.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No analysis results found for child controls of this parent',
+        parentControl: {
+          id: parentControl.id,
+          control_number: parentControl.control_number,
+          title: parentControl.title,
+        },
+        childControls: childControls.length,
+        aggregate: null,
+        results: [],
+      });
+    }
+
+    // 4. Deduplicate to latest result per control
+    const latestByControl = new Map();
+    for (const analysis of analyses) {
+      if (!latestByControl.has(analysis.control_id)) {
+        latestByControl.set(analysis.control_id, analysis);
+      }
+    }
+    const latestResults = Array.from(latestByControl.values());
+
+    // 5. Build response with aggregate
+    const results = latestResults.map((a) => ({
+      analysis_id: a.id,
+      control_id: a.control_id,
+      control_number: a.controls?.control_number,
+      control_title: a.controls?.title,
+      status: a.status,
+      compliance_percentage: a.compliance_percentage,
+      confidence_score: a.confidence_score,
+      summary: a.summary,
+      evidence_name: a.evidence?.file_name,
+      analyzed_at: a.analyzed_at,
+    }));
+
+    const aggregate = computeGroupAggregate(results);
+
+    res.json({
+      success: true,
+      parentControl: {
+        id: parentControl.id,
+        control_number: parentControl.control_number,
+        title: parentControl.title,
+      },
+      childControls: childControls.length,
+      aggregate,
+      results,
+    });
+  } catch (err) {
+    console.error('❌ Group results error:', err.message);
+    res.status(500).json({
+      error: 'Failed to fetch group results',
       details: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
