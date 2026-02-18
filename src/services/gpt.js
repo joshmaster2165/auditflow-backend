@@ -101,7 +101,7 @@ async function analyzeEvidence(documentText, requirementText, controlName) {
         { role: 'user', content: buildUserPrompt(documentText, requirementText, controlName) },
       ],
       temperature: 0.2,
-      max_tokens: 4000,
+      max_tokens: 16384,
       response_format: { type: 'json_object' },
     });
 

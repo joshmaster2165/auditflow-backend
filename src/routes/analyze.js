@@ -45,21 +45,48 @@ router.post('/evidence/:evidenceId', async (req, res) => {
     const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
     const documentText = await parseDocument(tempFilePath, mimeType);
 
-    // 4. Get requirement text from control — use multiple fallbacks
+    // 4. Get requirement text from control — description is the PRIMARY requirement
     const control = evidence.controls;
-    const controlName = control?.title || 'Unknown Control';
-    const requirementText =
-      control?.custom_fields?.requirement_text ||
-      control?.description ||
-      (control?.title ? `Verify compliance with: ${control.title}` : null) ||
-      'No specific requirement text provided';
 
-    if (!control?.description && !control?.custom_fields?.requirement_text) {
-      console.warn(`⚠️ Control "${controlName}" has no description — using title as requirement fallback`);
+    // DEBUG: Log what we actually got from the Supabase join
+    console.log(`🔎 Control object: ${JSON.stringify(control, null, 2)?.substring(0, 500)}`);
+
+    const controlName = control?.title || 'Unknown Control';
+    const controlNumber = control?.control_number || '';
+    const controlCategory = control?.category || '';
+    const frameworkName = control?.frameworks?.name || '';
+
+    // Description is the PRIMARY requirement — it contains the real compliance language
+    let requirementText = control?.description || control?.custom_fields?.requirement_text || null;
+
+    // If no description, build a structured requirement from all available fields
+    if (!requirementText && control?.title) {
+      console.warn(`⚠️ Control "${controlName}" has no description — building requirement from metadata`);
+      const parts = [];
+      if (frameworkName) parts.push(`Framework: ${frameworkName}`);
+      if (controlNumber) parts.push(`Control: ${controlNumber}`);
+      parts.push(`Requirement: ${control.title}`);
+      if (controlCategory) parts.push(`Domain: ${controlCategory}`);
+
+      requirementText = `Evaluate whether the evidence demonstrates compliance with the following requirement.\n\n${parts.join('\n')}\n\nAnalyze the evidence document for any content that addresses "${control.title}". Assess whether organizational policies, procedures, or controls described in the evidence satisfy this requirement.`;
+    } else if (requirementText) {
+      // Even when we have description, enrich it with framework/control context
+      const contextParts = [];
+      if (frameworkName) contextParts.push(`Framework: ${frameworkName}`);
+      if (controlNumber) contextParts.push(`Control: ${controlNumber}`);
+      if (controlName) contextParts.push(`Title: ${controlName}`);
+      if (controlCategory) contextParts.push(`Domain: ${controlCategory}`);
+
+      if (contextParts.length > 0) {
+        requirementText = `${contextParts.join(' | ')}\n\nRequirement:\n${requirementText}`;
+      }
     }
 
-    console.log(`📐 Control: ${controlName}`);
-    console.log(`📝 Requirement: ${requirementText.substring(0, 100)}...`);
+    requirementText = requirementText || 'No specific requirement text provided';
+
+    console.log(`📐 Control: ${controlName} (${controlNumber})`);
+    console.log(`🏛️ Framework: ${frameworkName || 'none'}`);
+    console.log(`📝 Requirement (first 200 chars): ${requirementText.substring(0, 200)}...`);
 
     // 5. Send to GPT for analysis
     const gptResult = await analyzeEvidence(documentText, requirementText, controlName);
