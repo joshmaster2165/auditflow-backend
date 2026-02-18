@@ -33,15 +33,17 @@ function attemptJsonRecovery(truncatedContent) {
   return null;
 }
 
-const SYSTEM_PROMPT = `You are an expert compliance auditor specializing in detailed gap analysis between compliance requirements and evidence documentation.
+const SYSTEM_PROMPT = `You are an expert compliance auditor specializing in gap analysis between compliance requirements and evidence documentation.
 
 Your task is to analyze whether evidence documents satisfy specific compliance requirements. You must:
 
-1. Break down the requirement into 3-7 testable sub-requirements
+1. Break down the requirement into its testable sub-requirements (as many or as few as appropriate for the requirement)
 2. For each sub-requirement, determine if it is met, partially met, or missing based on the evidence
 3. Quote specific evidence passages that support your findings
-4. Identify precise gaps where evidence is insufficient
+4. Identify gaps where evidence is insufficient
 5. Provide actionable recommendations
+
+If the user provides custom analysis instructions, you MUST follow them. They take priority over default analysis behavior and may adjust what you focus on, how detailed your analysis is, or how you format your recommendations.
 
 You must respond with valid JSON only. Do not include any text outside the JSON object.`;
 
@@ -57,40 +59,32 @@ ${requirementText}
 ${documentText}
 ${customInstructions ? `
 ## Custom Analysis Instructions:
-The project owner has provided the following guidance for this analysis. Apply these instructions when evaluating the evidence:
+The following project-level guidance MUST be applied to this analysis. These instructions take priority over default analysis behavior:
 ${customInstructions}
 ` : ''}
-## Instructions:
-Analyze the evidence against the requirement and return a JSON object with this exact structure:
+## Output Format:
+Return a JSON object with this structure. Adapt the depth and detail to what is appropriate for this specific analysis:
 
 {
   "status": "compliant" | "partial" | "non_compliant",
-  "confidence_score": <number 0-1>,
+  "confidence_score": <number 0.0-1.0>,
   "compliance_percentage": <number 0-100>,
-  "summary": "<brief summary of findings>",
+  "summary": "<concise summary of overall findings>",
   "requirements_breakdown": [
     {
-      "requirement_id": "REQ-1",
-      "requirement_text": "<specific sub-requirement>",
+      "requirement_id": "<short ID like REQ-1>",
+      "requirement_text": "<the sub-requirement being tested>",
       "status": "met" | "partial" | "missing",
-      "evidence_found": "<quoted evidence passage or null>",
-      "evidence_location": "<section/page reference or null>",
-      "gap_description": "<what's missing or null>",
-      "confidence": <number 0-1>
+      "evidence_found": "<relevant evidence passage or null if none>",
+      "gap_description": "<what is missing or null if fully met>",
+      "confidence": <number 0.0-1.0>
     }
   ],
-  "met_requirements": ["REQ-1", ...],
-  "partial_requirements": ["REQ-2", ...],
-  "missing_requirements": ["REQ-3", ...],
-  "evidence_mapping": {
-    "REQ-1": "<brief evidence reference>",
-    ...
-  },
   "recommendations": ["<actionable recommendation>", ...],
   "critical_gaps": ["<critical finding>", ...]
 }
 
-Break the requirement into 3-7 testable sub-requirements. Be precise about what evidence supports or contradicts each sub-requirement. Quote specific passages from the evidence document.`;
+Break the requirement into its natural sub-requirements — use as many or as few as the requirement warrants. Be precise about what evidence supports or contradicts each. Quote specific passages from the evidence document.`;
 }
 
 async function analyzeEvidence(documentText, requirementText, controlName, customInstructions) {
@@ -128,13 +122,44 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
       throw new Error('GPT returned invalid JSON response');
     }
 
-    // Validate required fields
-    if (!analysis.status || !analysis.requirements_breakdown) {
-      console.error('❌ GPT response missing required fields');
-      throw new Error('GPT response missing required fields (status, requirements_breakdown)');
+    // Normalize response — be flexible with GPT's output structure instead of hard-failing
+    if (!analysis.status) {
+      console.warn('⚠️ GPT response missing status field, defaulting to non_compliant');
+      analysis.status = 'non_compliant';
     }
 
-    console.log(`✅ GPT analysis complete: ${analysis.status} (${analysis.compliance_percentage}% compliance, confidence: ${analysis.confidence_score})`);
+    // Try to find requirements_breakdown under alternative key names GPT might use
+    if (!analysis.requirements_breakdown) {
+      analysis.requirements_breakdown = analysis.breakdown || analysis.sub_requirements || analysis.requirements || [];
+      if (analysis.requirements_breakdown.length > 0) {
+        console.log(`📋 Found requirements under alternative key (${analysis.requirements_breakdown.length} items)`);
+      }
+    }
+
+    // Ensure requirements_breakdown is always an array
+    if (!Array.isArray(analysis.requirements_breakdown)) {
+      console.warn('⚠️ requirements_breakdown is not an array, wrapping or defaulting');
+      analysis.requirements_breakdown = analysis.requirements_breakdown ? [analysis.requirements_breakdown] : [];
+    }
+
+    // Normalize each breakdown item to ensure required fields exist
+    analysis.requirements_breakdown = analysis.requirements_breakdown.map((item, i) => ({
+      requirement_id: item.requirement_id || item.id || `REQ-${i + 1}`,
+      requirement_text: item.requirement_text || item.text || item.description || item.requirement || 'Sub-requirement',
+      status: item.status || 'missing',
+      evidence_found: item.evidence_found || item.evidence || item.evidence_text || null,
+      gap_description: item.gap_description || item.gap || item.gaps || null,
+      confidence: parseFloat(item.confidence || item.confidence_score || 0.5),
+    }));
+
+    // Ensure top-level fields have safe defaults
+    analysis.confidence_score = parseFloat(analysis.confidence_score || 0);
+    analysis.compliance_percentage = parseInt(analysis.compliance_percentage || 0, 10);
+    analysis.summary = analysis.summary || '';
+    analysis.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
+    analysis.critical_gaps = Array.isArray(analysis.critical_gaps) ? analysis.critical_gaps : [];
+
+    console.log(`✅ GPT analysis complete: ${analysis.status} (${analysis.compliance_percentage}% compliance, confidence: ${analysis.confidence_score}, ${analysis.requirements_breakdown.length} sub-requirements)`);
 
     return {
       analysis,
