@@ -199,6 +199,71 @@ router.post('/evidence/:evidenceId', async (req, res) => {
   }
 });
 
+// GET /api/analyze/results/by-control/:controlId - Fetch latest analysis for a specific control
+// Useful when you only know the control ID (e.g., category page listing)
+router.get('/results/by-control/:controlId', async (req, res) => {
+  try {
+    const { controlId } = req.params;
+
+    const { data, error } = await supabase
+      .from('analysis_results')
+      .select(`
+        *,
+        evidence:evidence_id (id, file_name, file_type, created_at),
+        controls:control_id (id, title, description)
+      `)
+      .eq('control_id', controlId)
+      .order('analyzed_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: 'No analysis found for this control' });
+    }
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('❌ Fetch results by control error:', err.message);
+    res.status(500).json({
+      error: 'Failed to fetch analysis results',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+});
+
+// GET /api/analyze/results/:evidenceId/:controlId - Fetch analysis for specific evidence+control pair
+// Used by category pages after bulk analysis where one evidence is analyzed against multiple controls
+router.get('/results/:evidenceId/:controlId', async (req, res) => {
+  try {
+    const { evidenceId, controlId } = req.params;
+
+    const { data, error } = await supabase
+      .from('analysis_results')
+      .select(`
+        *,
+        evidence:evidence_id (id, file_name, file_type, created_at),
+        controls:control_id (id, title, description)
+      `)
+      .eq('evidence_id', evidenceId)
+      .eq('control_id', controlId)
+      .order('analyzed_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: 'No analysis found for this evidence+control pair' });
+    }
+
+    res.json({ success: true, data });
+  } catch (err) {
+    console.error('❌ Fetch results by evidence+control error:', err.message);
+    res.status(500).json({
+      error: 'Failed to fetch analysis results',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+});
+
 // GET /api/analyze/results/:evidenceId - Fetch latest analysis for evidence
 router.get('/results/:evidenceId', async (req, res) => {
   try {
