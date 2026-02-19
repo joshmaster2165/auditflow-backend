@@ -545,23 +545,36 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
         responseSummary = `Findings from ${activeEvidence.file_name}: ${metCount} met, ${partialCount} partial, ${missingCount} missing out of ${filteredRequirements.length} requirements.`;
       }
 
-      responseFindings = { ...analysis.findings, requirements_breakdown: filteredRequirements };
+      // Scope findings to active evidence only — don't leak combined per_evidence_breakdown
+      const filteredRecommendations = analysis.findings?.recommendations || [];
+      const filteredCriticalGaps = analysis.findings?.critical_gaps || [];
+      responseFindings = {
+        requirements_breakdown: filteredRequirements,
+        recommendations: filteredRecommendations,
+        critical_gaps: filteredCriticalGaps,
+        per_evidence_breakdown: { [activeEvidence.id]: filteredRequirements },
+      };
 
-      // Rebuild diff_data from filtered findings
-      if (filteredRequirements.length > 0) {
-        const rebuiltDiff = generateDiff(
-          { status: responseStatus, compliance_percentage: responseCompliance, confidence_score: responseConfidence, requirements_breakdown: filteredRequirements },
-          analysis.diff_data?.original_requirement || ''
-        );
-        responseDiffData = {
-          requirement_coverage: rebuiltDiff.requirement_coverage,
-          statistics: rebuiltDiff.statistics,
-          side_by_side: rebuiltDiff.side_by_side,
-          recommendations: analysis.diff_data?.recommendations || [],
-          critical_gaps: analysis.diff_data?.critical_gaps || [],
-        };
-        console.log(`🔄 [Viewer] Rebuilt diff_data for ${activeEvidence.file_name}: ${rebuiltDiff.statistics.total_requirements} requirements, ${rebuiltDiff.statistics.met_count} met`);
-      }
+      // Always rebuild diff_data from filtered findings (even if 0 — generateDiff handles empty gracefully)
+      const rebuiltDiff = generateDiff(
+        {
+          status: responseStatus,
+          compliance_percentage: responseCompliance,
+          confidence_score: responseConfidence,
+          requirements_breakdown: filteredRequirements,
+          recommendations: filteredRecommendations,
+          critical_gaps: filteredCriticalGaps,
+        },
+        analysis.diff_data?.original_requirement || ''
+      );
+      responseDiffData = {
+        requirement_coverage: rebuiltDiff.requirement_coverage,
+        statistics: rebuiltDiff.statistics,
+        side_by_side: rebuiltDiff.side_by_side,
+        recommendations: rebuiltDiff.recommendations,
+        critical_gaps: rebuiltDiff.critical_gaps,
+      };
+      console.log(`🔄 [Viewer] Rebuilt diff_data for ${activeEvidence.file_name}: ${rebuiltDiff.statistics.total_requirements} requirements, ${rebuiltDiff.statistics.met_count} met`);
     }
 
     // 4. IMAGE VIEWER: return signed URL + extracted text, no highlights
