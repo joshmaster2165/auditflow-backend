@@ -914,15 +914,23 @@ router.get('/debug-controls/:controlId', async (req, res) => {
   }
 });
 
-// POST /api/analyze/analyze-all/:parentControlId — Validate all child controls at once
+// POST /api/analyze/analyze-all/:parentControlId — Validate all controls in a category at once
+//
+// Supports TWO modes:
+//   Mode 1 (hierarchy):  parentControlId is a true parent → find children via parent_control_number/prefix
+//   Mode 2 (category):   parentControlId is one control in a flat category → find all siblings in same category
+//
+// Optional body: { controlIds: [...] } to explicitly specify which controls to analyze
+//
 router.post('/analyze-all/:parentControlId', async (req, res) => {
   const tempFiles = [];
 
   try {
     const { parentControlId } = req.params;
-    console.log(`\n🔍 Starting ANALYZE-ALL for parent control: ${parentControlId}`);
+    const { controlIds: explicitIds } = req.body || {};
+    console.log(`\n🔍 Starting ANALYZE-ALL for control: ${parentControlId}`);
 
-    // 1. Fetch parent control with framework
+    // 1. Fetch the reference control with framework
     const { data: parentControl, error: parentError } = await supabase
       .from('controls')
       .select('*, frameworks:framework_id (*)')
@@ -930,26 +938,70 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       .single();
 
     if (parentError || !parentControl) {
-      return res.status(404).json({ error: 'Parent control not found', details: parentError?.message });
+      return res.status(404).json({ error: 'Control not found', details: parentError?.message });
     }
 
-    // 2. Fetch all child controls under this parent (cascading strategies)
-    const { childControls, matchStrategy } = await findChildControls(parentControl);
+    // 2. Determine which controls to analyze
+    let controlsToAnalyze = [];
+    let matchStrategy = 'unknown';
 
-    if (!childControls || childControls.length === 0) {
+    if (explicitIds && Array.isArray(explicitIds) && explicitIds.length > 0) {
+      // --- Mode: Explicit control IDs from frontend ---
+      const { data: explicitControls, error: explicitError } = await supabase
+        .from('controls')
+        .select('*, frameworks:framework_id (*)')
+        .in('id', explicitIds)
+        .order('sort_order', { ascending: true });
+
+      if (!explicitError && explicitControls && explicitControls.length > 0) {
+        controlsToAnalyze = explicitControls;
+        matchStrategy = 'explicit_ids';
+      }
+    }
+
+    if (controlsToAnalyze.length === 0) {
+      // --- Try cascading child discovery (hierarchy) ---
+      const { childControls, matchStrategy: ms } = await findChildControls(parentControl);
+      if (childControls && childControls.length > 0) {
+        controlsToAnalyze = childControls;
+        matchStrategy = ms;
+      }
+    }
+
+    if (controlsToAnalyze.length === 0 && parentControl.category) {
+      // --- Fallback: All controls in the same category (flat/grouped frameworks) ---
+      const { data: categoryControls, error: catError } = await supabase
+        .from('controls')
+        .select('*, frameworks:framework_id (*)')
+        .eq('framework_id', parentControl.framework_id)
+        .eq('category', parentControl.category)
+        .order('sort_order', { ascending: true });
+
+      if (!catError && categoryControls && categoryControls.length > 0) {
+        controlsToAnalyze = categoryControls;
+        matchStrategy = 'same_category';
+        console.log(`🔗 Found ${categoryControls.length} controls in category "${parentControl.category}"`);
+      }
+    }
+
+    if (controlsToAnalyze.length === 0) {
       return res.status(400).json({
-        error: `No child controls found under ${parentControl.control_number} (${parentControl.title}). Tried parent_control_number, group/category, and prefix matching.`,
+        error: `No controls found to analyze for ${parentControl.control_number} (${parentControl.title}).`,
+        hint: 'Tried hierarchy, category, and prefix matching. Send controlIds in request body as fallback.',
       });
     }
 
-    console.log(`📐 Parent: ${parentControl.control_number} - ${parentControl.title}`);
-    console.log(`🔗 Matched ${childControls.length} children via: ${matchStrategy}`);
+    console.log(`📐 Reference: ${parentControl.control_number} - ${parentControl.title}`);
+    console.log(`🔗 ${controlsToAnalyze.length} controls to analyze (strategy: ${matchStrategy})`);
 
-    // 3. Fetch all evidence attached to the PARENT control
+    // 3. Fetch evidence — try parent control first, then all controls in the group
+    const controlIdsForEvidence = [parentControlId, ...controlsToAnalyze.map(c => c.id)];
+    const uniqueIds = [...new Set(controlIdsForEvidence)];
+
     const { data: evidenceFiles, error: evidenceError } = await supabase
       .from('evidence')
       .select('*')
-      .eq('control_id', parentControlId)
+      .in('control_id', uniqueIds)
       .order('uploaded_at', { ascending: true });
 
     if (evidenceError) {
@@ -1003,7 +1055,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     }
 
     // 7. Build controls list with enriched requirement text
-    const controlsList = childControls.map(c => ({
+    const controlsList = controlsToAnalyze.map(c => ({
       control_number: c.control_number || '',
       title: c.title || 'Unnamed Control',
       requirementText: buildRequirementText(c, c.frameworks),
@@ -1017,7 +1069,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     const documentNames = parsedDocs.map(d => d.evidence.file_name);
     const userPromptOverride = buildAnalyzeAllPrompt(combinedText, controlsList, customInstructions, documentNames);
 
-    console.log(`🤖 Sending ${parsedDocs.length} docs + ${childControls.length} controls to GPT...`);
+    console.log(`🤖 Sending ${parsedDocs.length} docs + ${controlsToAnalyze.length} controls to GPT...`);
     const gptResult = await analyzeEvidence(combinedText, 'multiple controls', parentControl.title, customInstructions, { userPromptOverride });
 
     // 10. Parse per-control results from GPT response
@@ -1029,9 +1081,9 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       filePath: d.evidence.file_path,
     }));
 
-    // 11. Save one analysis_results per child control
+    // 11. Save one analysis_results per control
     const results = [];
-    for (const child of childControls) {
+    for (const child of controlsToAnalyze) {
       // Match GPT result by control_number
       const gptCtrl = gptControls.find(g =>
         g.control_number === child.control_number ||
@@ -1153,7 +1205,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         tokens_used: gptResult.usage,
         analyzed_at: new Date().toISOString(),
         documents_analyzed: parsedDocs.length,
-        controls_analyzed: childControls.length,
+        controls_analyzed: controlsToAnalyze.length,
       },
     });
   } catch (err) {
