@@ -89,7 +89,7 @@ Return a JSON object with this structure. Adapt the depth and detail to what is 
       "requirement_id": "<short ID like REQ-1>",
       "requirement_text": "<the sub-requirement being tested>",
       "status": "met" | "partial" | "missing",
-      "evidence_found": "<EXACT verbatim quote copied character-for-character from the document, or null if none. If the evidence is contextual rather than a direct quote, describe what in the document supports this finding.>",
+      "evidence_found": "<STRONGLY prefer an EXACT verbatim quote copied character-for-character from the document — this text is used to highlight passages in the document viewer. Include at least 1-2 full sentences for context. If no verbatim quote is possible, describe what in the document supports this finding and include any key phrases from the document in 'single quotes'. Null if no evidence exists.>",
       "analysis_notes": "<your analysis reasoning: explain WHY you rated this status, HOW the evidence connects to the requirement, and what the evidence demonstrates about compliance. This should help an auditor understand your assessment.>",
       "evidence_location": {
         "start_index": <0-indexed character position where the evidence_found quote begins in the Evidence Document Content above>,
@@ -104,7 +104,7 @@ Return a JSON object with this structure. Adapt the depth and detail to what is 
   "critical_gaps": ["<critical finding>", ...]
 }
 
-For evidence_found: Prefer copying exact text from the document character-for-character when possible. Include enough surrounding context (at least 1-2 full sentences) to make the highlighted passage meaningful in the document viewer. If the evidence is more contextual or spread across sections, describe what you found.
+For evidence_found: STRONGLY prefer copying exact text from the document character-for-character — this text is matched against the document to create highlights in the document viewer. Include enough surrounding context (at least 1-2 full sentences) to make the highlighted passage meaningful. If the evidence is spread across sections or you cannot quote verbatim, describe what you found but wrap any key phrases or titles from the document in 'single quotes' so they can still be located.
 
 For analysis_notes: This is REQUIRED for every sub-requirement. Explain your reasoning — how does this specific evidence demonstrate (or fail to demonstrate) compliance? What does it tell an auditor? This is where you provide the analytical insight.
 
@@ -148,7 +148,7 @@ Return a JSON object with this structure. Assess compliance across ALL documents
       "requirement_id": "<short ID like REQ-1>",
       "requirement_text": "<the sub-requirement being tested>",
       "status": "met" | "partial" | "missing",
-      "evidence_found": "<EXACT verbatim quote copied character-for-character from the document when possible, or describe what in the document supports this finding>",
+      "evidence_found": "<STRONGLY prefer an EXACT verbatim quote copied character-for-character from the document — this text is used to highlight passages in the document viewer. If no verbatim quote is possible, describe what supports this finding and include key phrases from the document in 'single quotes'.>",
       "evidence_source": "<EXACT filename of the document this evidence came from, e.g. '${documentNames[0] || 'document.pdf'}'>",
       "analysis_notes": "<your analysis reasoning: explain HOW this evidence supports or fails to meet the requirement, and what it demonstrates about compliance>",
       "evidence_location": {
@@ -164,7 +164,7 @@ Return a JSON object with this structure. Assess compliance across ALL documents
   "critical_gaps": ["<critical finding>", ...]
 }
 
-For evidence_found: Prefer copying exact text from the document character-for-character. If the evidence is more contextual, describe what you found.
+For evidence_found: STRONGLY prefer copying exact text from the document character-for-character — this text is matched against the document to create highlights in the document viewer. If the evidence is contextual or spread across sections, describe what you found but wrap any key phrases or titles from the document in 'single quotes' so they can still be located.
 
 CRITICAL for evidence_source: You MUST specify the exact filename of the document where each piece of evidence was found. Use the filenames from the "=== DOCUMENT N: filename ===" headers.
 
@@ -222,7 +222,7 @@ Return a JSON object. You MUST evaluate every control listed above. For each con
           "requirement_id": "<short ID like REQ-1>",
           "requirement_text": "<the sub-requirement being tested>",
           "status": "met" | "partial" | "missing",
-          "evidence_found": "<copy exact text from the document when possible. If the evidence is contextual rather than a direct quote, describe what in the document supports this finding. For images, describe the specific visual evidence.>",
+          "evidence_found": "<STRONGLY prefer an EXACT verbatim quote copied character-for-character from the document — this text is used to highlight passages in the document viewer. If no verbatim quote is possible, describe what supports this finding and include key phrases from the document in 'single quotes'. For images, describe the specific visual evidence.>",
           "evidence_source": "<exact filename of the document this evidence came from>",
           "analysis_notes": "<your analysis reasoning: explain WHY you rated this status, HOW the evidence connects to the requirement, and what the evidence demonstrates about compliance.>",
           "gap_description": "<what is missing AND why it matters for compliance, or null if fully met>",
@@ -236,7 +236,7 @@ Return a JSON object. You MUST evaluate every control listed above. For each con
 }
 
 CRITICAL: You MUST include ALL ${controls.length} controls in the "controls" array — one entry per control listed above.
-CRITICAL for evidence_found: Copy exact text from the document when possible. If evidence is contextual, describe what supports the finding.
+CRITICAL for evidence_found: STRONGLY prefer copying exact text character-for-character — this text is matched against the document to create highlights in the viewer. If evidence is contextual, describe what supports the finding but wrap key phrases from the document in 'single quotes'.
 CRITICAL for evidence_source: Specify the exact filename from the "=== DOCUMENT N: filename ===" headers.
 CRITICAL for analysis_notes: Provide thorough reasoning for each finding — explain how the evidence connects to the requirement and why you rated it met/partial/missing.
 

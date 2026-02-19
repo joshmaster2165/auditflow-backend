@@ -602,7 +602,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       highlightRanges = analysis.diff_data?.viewer_highlight_ranges || null;
     }
 
-    const hasValidCache = !isAlternateEvidence && documentText && highlightRanges && highlightRanges.length > 0;
+    const hasValidCache = !isAlternateEvidence && !shouldFilterByEvidence && documentText && highlightRanges && highlightRanges.length > 0;
 
     // 6. If not cached, download and parse the document
     if (!hasValidCache) {

@@ -168,8 +168,8 @@ function verifyAndBuildHighlightRanges(documentText, requirementsBreakdown) {
   const ranges = [];
 
   for (const req of requirementsBreakdown) {
-    // Skip items with no evidence to highlight
-    if (!req.evidence_found || req.status === 'missing') continue;
+    // Skip items with no evidence text to search for
+    if (!req.evidence_found) continue;
 
     const loc = req.evidence_location || {};
     const quote = req.evidence_found;
@@ -198,6 +198,47 @@ function verifyAndBuildHighlightRanges(documentText, requirementsBreakdown) {
         startOffset = idx;
         endOffset = idx + quote.length;
         matchQuality = 'exact';
+      }
+    }
+
+    // Tier 2.5: Extract quoted phrases from contextual evidence descriptions
+    //  GPT may write: "The document's 'Information Security Policy v2.1' describes..."
+    //  We extract the quoted phrase and search for it in the document.
+    if (matchQuality === 'unmatched') {
+      const quotedPhrases = [];
+      const quoteRegex = /["']([^"']{10,}?)["']/g;
+      let m;
+      while ((m = quoteRegex.exec(quote)) !== null) {
+        quotedPhrases.push(m[1]);
+      }
+      // Sort longest first — longer phrases are more distinctive
+      quotedPhrases.sort((a, b) => b.length - a.length);
+
+      for (const phrase of quotedPhrases) {
+        const idx = documentText.indexOf(phrase);
+        if (idx !== -1) {
+          // Expand to sentence boundaries for more context
+          let sentStart = documentText.lastIndexOf('.', idx);
+          sentStart = sentStart >= 0 && idx - sentStart < 200 ? sentStart + 1 : idx;
+          let sentEnd = documentText.indexOf('.', idx + phrase.length);
+          sentEnd = sentEnd >= 0 && sentEnd - idx < 300 ? sentEnd + 1 : idx + phrase.length;
+          startOffset = sentStart;
+          endOffset = sentEnd;
+          matchQuality = 'normalized';
+          break;
+        }
+        // Try whitespace-normalized version of the phrase
+        const normPhrase = normalizeWs(phrase);
+        if (normPhrase.length >= 10) {
+          const normDoc = normalizeWs(documentText);
+          const nIdx = normDoc.indexOf(normPhrase);
+          if (nIdx !== -1) {
+            startOffset = mapNormalizedOffset(documentText, nIdx);
+            endOffset = mapNormalizedOffset(documentText, nIdx + normPhrase.length);
+            matchQuality = 'normalized';
+            break;
+          }
+        }
       }
     }
 
