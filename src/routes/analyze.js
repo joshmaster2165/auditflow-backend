@@ -419,28 +419,60 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       return res.status(404).json({ error: 'Analysis not found', details: analysisError?.message });
     }
 
-    const evidence = analysis.evidence;
-    if (!evidence) {
+    const defaultEvidence = analysis.evidence;
+    if (!defaultEvidence) {
       return res.status(400).json({ error: 'Evidence record not found for this analysis' });
     }
 
-    const filePath = evidence.file_path;
+    // 2. Check for alternate evidence document via ?evidenceId= query param
+    const requestedEvidenceId = req.query.evidenceId;
+    const sources = analysis.diff_data?.evidence_sources || [];
+    let activeEvidence = defaultEvidence;
+    let isAlternateEvidence = false;
+
+    if (requestedEvidenceId && requestedEvidenceId !== defaultEvidence.id) {
+      const isValidSource = sources.some(s => s.id === requestedEvidenceId);
+      if (isValidSource) {
+        const { data: altEvidence, error: altError } = await supabase
+          .from('evidence')
+          .select('id, file_name, file_type, file_path')
+          .eq('id', requestedEvidenceId)
+          .single();
+
+        if (!altError && altEvidence && altEvidence.file_path) {
+          activeEvidence = altEvidence;
+          isAlternateEvidence = true;
+          console.log(`🔄 [Viewer] Switching to alternate evidence: ${altEvidence.file_name}`);
+        }
+      } else {
+        console.warn(`⚠️ [Viewer] Requested evidenceId ${requestedEvidenceId} not in evidence_sources — using default`);
+      }
+    }
+
+    const filePath = activeEvidence.file_path;
     if (!filePath) {
       return res.status(400).json({ error: 'Evidence file path not available' });
     }
 
-    const mimeType = evidence.file_type || 'text/plain';
+    const mimeType = activeEvidence.file_type || 'text/plain';
 
-    // 2. Check for cached viewer data in diff_data
-    //    Re-compute if highlightRanges is empty (may have been cached before fuzzy matching was added)
-    let documentText = analysis.diff_data?.viewer_document_text || null;
-    let documentHtml = analysis.diff_data?.viewer_document_html || null;
-    let highlightRanges = analysis.diff_data?.viewer_highlight_ranges || null;
-    const hasValidCache = documentText && highlightRanges && highlightRanges.length > 0;
+    // 3. Check for cached viewer data in diff_data (only for default evidence)
+    //    Alternate evidence is always freshly parsed (not cached)
+    let documentText = null;
+    let documentHtml = null;
+    let highlightRanges = null;
 
-    // 3. If not cached or cache had zero highlights, regenerate
+    if (!isAlternateEvidence) {
+      documentText = analysis.diff_data?.viewer_document_text || null;
+      documentHtml = analysis.diff_data?.viewer_document_html || null;
+      highlightRanges = analysis.diff_data?.viewer_highlight_ranges || null;
+    }
+
+    const hasValidCache = !isAlternateEvidence && documentText && highlightRanges && highlightRanges.length > 0;
+
+    // 4. If not cached, download and parse the document
     if (!hasValidCache) {
-      console.log(`📄 [Viewer] First view for analysis ${analysisId} — downloading and parsing document`);
+      console.log(`📄 [Viewer] ${isAlternateEvidence ? 'Alternate' : 'First'} view for analysis ${analysisId} — downloading ${activeEvidence.file_name}`);
 
       tempFilePath = await downloadFile(filePath);
       const parsed = await parseDocumentForViewer(tempFilePath, mimeType);
@@ -448,40 +480,54 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       documentText = parsed.text;
       documentHtml = parsed.html; // null for PDF/text
 
-      // Verify GPT's offsets and build highlight ranges
+      // Build highlight ranges — for alternate evidence, filter to findings from this document
       const breakdown = analysis.findings?.requirements_breakdown || [];
-      highlightRanges = verifyAndBuildHighlightRanges(documentText, breakdown);
+      let filteredBreakdown = breakdown;
+
+      if (isAlternateEvidence) {
+        // Only match highlights for findings that reference this specific document
+        filteredBreakdown = breakdown.filter(item => {
+          const src = (item.evidence_source || '').toLowerCase();
+          const fileName = (activeEvidence.file_name || '').toLowerCase();
+          return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
+        });
+        console.log(`🔍 [Viewer] Filtered to ${filteredBreakdown.length} of ${breakdown.length} findings for ${activeEvidence.file_name}`);
+      }
+
+      highlightRanges = verifyAndBuildHighlightRanges(documentText, filteredBreakdown);
 
       console.log(`🎯 [Viewer] ${highlightRanges.length} highlight ranges matched (${highlightRanges.filter(r => r.matchQuality === 'exact').length} exact)`);
 
-      // Cache results back to diff_data (non-blocking)
-      supabase
-        .from('analysis_results')
-        .update({
-          diff_data: {
-            ...analysis.diff_data,
-            viewer_document_text: documentText,
-            viewer_document_html: documentHtml,
-            viewer_highlight_ranges: highlightRanges,
-          },
-        })
-        .eq('id', analysisId)
-        .then(({ error: updateError }) => {
-          if (updateError) {
-            console.warn(`⚠️ [Viewer] Failed to cache viewer data: ${updateError.message}`);
-          } else {
-            console.log(`💾 [Viewer] Cached viewer data for analysis ${analysisId}`);
-          }
-        });
+      // Cache results back to diff_data (only for default evidence, non-blocking)
+      if (!isAlternateEvidence) {
+        supabase
+          .from('analysis_results')
+          .update({
+            diff_data: {
+              ...analysis.diff_data,
+              viewer_document_text: documentText,
+              viewer_document_html: documentHtml,
+              viewer_highlight_ranges: highlightRanges,
+            },
+          })
+          .eq('id', analysisId)
+          .then(({ error: updateError }) => {
+            if (updateError) {
+              console.warn(`⚠️ [Viewer] Failed to cache viewer data: ${updateError.message}`);
+            } else {
+              console.log(`💾 [Viewer] Cached viewer data for analysis ${analysisId}`);
+            }
+          });
+      }
     }
 
-    // 4. Generate signed URL for PDF viewing
+    // 5. Generate signed URL for PDF viewing
     let signedUrl = null;
     if (mimeType === 'application/pdf') {
       signedUrl = await getSignedUrl(filePath, 300);
     }
 
-    // 5. Determine file type for frontend
+    // 6. Determine file type for frontend
     let fileType = 'text';
     if (mimeType === 'application/pdf') {
       fileType = 'pdf';
@@ -489,7 +535,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       fileType = 'docx';
     }
 
-    // 6. Return viewer response
+    // 7. Return viewer response
     res.json({
       success: true,
       viewer: {
@@ -499,6 +545,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
         documentText,
         documentHtml,
         highlightRanges,
+        currentEvidenceId: activeEvidence.id,
       },
       analysis: {
         id: analysis.id,
@@ -515,11 +562,11 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
           critical_gaps: analysis.diff_data?.critical_gaps,
         },
       },
-      evidenceSources: analysis.diff_data?.evidence_sources || null,
+      evidenceSources: sources.length > 0 ? sources : null,
       evidence: {
-        id: evidence.id,
-        fileName: evidence.file_name,
-        fileType: evidence.file_type,
+        id: activeEvidence.id,
+        fileName: activeEvidence.file_name,
+        fileType: activeEvidence.file_type,
       },
       control: analysis.controls ? {
         id: analysis.controls.id,
