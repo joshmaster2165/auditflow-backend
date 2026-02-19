@@ -868,6 +868,49 @@ router.post('/group-by-ids/:evidenceId', async (req, res) => {
 // All evidence from parent + all child requirements → one GPT call
 // ══════════════════════════════════════════════════════════════════════════════
 
+// GET /api/analyze/debug-controls/:controlId — Debug: show control and siblings
+router.get('/debug-controls/:controlId', async (req, res) => {
+  try {
+    const { controlId } = req.params;
+
+    // Fetch the specified control
+    const { data: control, error: controlError } = await supabase
+      .from('controls')
+      .select('id, control_number, title, group, category, parent_control_number, level, sort_order, framework_id')
+      .eq('id', controlId)
+      .single();
+
+    if (controlError || !control) {
+      return res.status(404).json({ error: 'Control not found', details: controlError?.message });
+    }
+
+    // Fetch ALL controls in the same framework to understand the structure
+    const { data: allControls, error: allError } = await supabase
+      .from('controls')
+      .select('id, control_number, title, group, category, parent_control_number, level, sort_order')
+      .eq('framework_id', control.framework_id)
+      .order('sort_order', { ascending: true });
+
+    res.json({
+      target_control: control,
+      framework_id: control.framework_id,
+      total_controls: allControls?.length || 0,
+      all_controls: (allControls || []).map(c => ({
+        id: c.id,
+        control_number: c.control_number,
+        title: c.title,
+        group: c.group,
+        category: c.category,
+        parent_control_number: c.parent_control_number,
+        level: c.level,
+        sort_order: c.sort_order,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/analyze/analyze-all/:parentControlId — Validate all child controls at once
 router.post('/analyze-all/:parentControlId', async (req, res) => {
   const tempFiles = [];
