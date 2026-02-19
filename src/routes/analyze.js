@@ -5,7 +5,7 @@ const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/
 const fs = require('fs');
 const { parseDocument, parseDocumentForViewer, isImageType } = require('../services/documentParser');
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
-const { analyzeEvidence, analyzeImageEvidence, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt } = require('../services/gpt');
+const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore, buildPerEvidenceBreakdown } = require('../utils/analysisHelpers');
@@ -1319,26 +1319,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       }
 
       // Normalize the per-control analysis to match standard format
-      const controlAnalysis = {
-        status: gptCtrl.status || 'non_compliant',
-        confidence_score: parseFloat(gptCtrl.confidence_score || 0),
-        compliance_percentage: parseInt(gptCtrl.compliance_percentage || 0, 10),
-        summary: gptCtrl.summary || '',
-        requirements_breakdown: (gptCtrl.requirements_breakdown || []).map((item, i) => ({
-          requirement_id: item.requirement_id || `REQ-${i + 1}`,
-          requirement_text: item.requirement_text || '',
-          status: item.status || 'missing',
-          evidence_found: item.evidence_found || null,
-          evidence_source: item.evidence_source || null,
-          evidence_location: item.evidence_location || { start_index: -1, end_index: -1, section_context: null },
-          analysis_notes: item.analysis_notes || item.notes || item.reasoning || null,
-          visual_description: item.visual_description || item.image_description || null,
-          gap_description: item.gap_description || null,
-          confidence: parseFloat(item.confidence || 0.5),
-        })),
-        recommendations: Array.isArray(gptCtrl.recommendations) ? gptCtrl.recommendations : [],
-        critical_gaps: Array.isArray(gptCtrl.critical_gaps) ? gptCtrl.critical_gaps : [],
-      };
+      const controlAnalysis = normalizeGptAnalysis({ ...gptCtrl });
 
       // Build per-evidence breakdown for reliable tab switching
       controlAnalysis.per_evidence_breakdown = buildPerEvidenceBreakdown(
@@ -1594,30 +1575,7 @@ router.post('/multi-evidence/:controlId', async (req, res) => {
       }
 
       // Normalize
-      if (!analysis.status) analysis.status = 'non_compliant';
-      if (!analysis.requirements_breakdown) {
-        analysis.requirements_breakdown = analysis.breakdown || analysis.sub_requirements || analysis.requirements || [];
-      }
-      if (!Array.isArray(analysis.requirements_breakdown)) {
-        analysis.requirements_breakdown = [];
-      }
-      analysis.requirements_breakdown = analysis.requirements_breakdown.map((item, i) => ({
-        requirement_id: item.requirement_id || `REQ-${i + 1}`,
-        requirement_text: item.requirement_text || item.text || 'Sub-requirement',
-        status: item.status || 'missing',
-        evidence_found: item.evidence_found || null,
-        evidence_source: item.evidence_source || null,
-        evidence_location: item.evidence_location || { start_index: -1, end_index: -1, section_context: null },
-        analysis_notes: item.analysis_notes || item.notes || item.reasoning || null,
-        visual_description: item.visual_description || item.image_description || null,
-        gap_description: item.gap_description || null,
-        confidence: parseFloat(item.confidence || 0.5),
-      }));
-      analysis.confidence_score = parseFloat(analysis.confidence_score || 0);
-      analysis.compliance_percentage = parseInt(analysis.compliance_percentage || 0, 10);
-      analysis.summary = analysis.summary || '';
-      analysis.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
-      analysis.critical_gaps = Array.isArray(analysis.critical_gaps) ? analysis.critical_gaps : [];
+      normalizeGptAnalysis(analysis);
 
       gptResult = { analysis, model: response.model, usage: response.usage, finish_reason: choice.finish_reason };
     } else {

@@ -49,6 +49,49 @@ function attemptJsonRecovery(truncatedContent) {
   return null;
 }
 
+/**
+ * Normalize a GPT analysis response to ensure all expected fields exist.
+ * Handles alternative key names GPT may use and provides safe defaults.
+ * Used by analyzeEvidence, analyzeImageEvidence, and inline mixed-content paths.
+ */
+function normalizeGptAnalysis(analysis) {
+  if (!analysis.status) {
+    analysis.status = 'non_compliant';
+  }
+
+  // Try to find requirements_breakdown under alternative key names GPT might use
+  if (!analysis.requirements_breakdown) {
+    analysis.requirements_breakdown = analysis.breakdown || analysis.sub_requirements || analysis.requirements || [];
+  }
+  if (!Array.isArray(analysis.requirements_breakdown)) {
+    analysis.requirements_breakdown = analysis.requirements_breakdown ? [analysis.requirements_breakdown] : [];
+  }
+
+  // Normalize each breakdown item to ensure required fields exist
+  analysis.requirements_breakdown = analysis.requirements_breakdown.map((item, i) => ({
+    requirement_id: item.requirement_id || item.id || `REQ-${i + 1}`,
+    requirement_text: item.requirement_text || item.text || item.description || item.requirement || 'Sub-requirement',
+    status: item.status || 'missing',
+    evidence_found: item.evidence_found || item.evidence || item.evidence_text || null,
+    evidence_location: item.evidence_location || item.location || { start_index: -1, end_index: -1, section_context: null },
+    evidence_source: item.evidence_source || item.source_document || null,
+    analysis_notes: item.analysis_notes || item.notes || item.reasoning || item.analysis || null,
+    visual_description: item.visual_description || item.image_description || null,
+    gap_description: item.gap_description || item.gap || item.gaps || null,
+    confidence: parseFloat(item.confidence || item.confidence_score || 0.5),
+  }));
+
+  // Ensure top-level fields have safe defaults
+  analysis.confidence_score = parseFloat(analysis.confidence_score || 0);
+  analysis.compliance_percentage = parseInt(analysis.compliance_percentage || 0, 10);
+  analysis.summary = analysis.summary || '';
+  analysis.extracted_text = analysis.extracted_text || '';
+  analysis.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
+  analysis.critical_gaps = Array.isArray(analysis.critical_gaps) ? analysis.critical_gaps : [];
+
+  return analysis;
+}
+
 const SYSTEM_PROMPT = `You are an expert compliance auditor specializing in gap analysis between compliance requirements and evidence documentation.
 
 Your task is to analyze whether evidence documents satisfy specific compliance requirements. You must:
@@ -293,45 +336,7 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
     }
 
     // Normalize response — be flexible with GPT's output structure instead of hard-failing
-    if (!analysis.status) {
-      console.warn('⚠️ GPT response missing status field, defaulting to non_compliant');
-      analysis.status = 'non_compliant';
-    }
-
-    // Try to find requirements_breakdown under alternative key names GPT might use
-    if (!analysis.requirements_breakdown) {
-      analysis.requirements_breakdown = analysis.breakdown || analysis.sub_requirements || analysis.requirements || [];
-      if (analysis.requirements_breakdown.length > 0) {
-        console.log(`📋 Found requirements under alternative key (${analysis.requirements_breakdown.length} items)`);
-      }
-    }
-
-    // Ensure requirements_breakdown is always an array
-    if (!Array.isArray(analysis.requirements_breakdown)) {
-      console.warn('⚠️ requirements_breakdown is not an array, wrapping or defaulting');
-      analysis.requirements_breakdown = analysis.requirements_breakdown ? [analysis.requirements_breakdown] : [];
-    }
-
-    // Normalize each breakdown item to ensure required fields exist
-    analysis.requirements_breakdown = analysis.requirements_breakdown.map((item, i) => ({
-      requirement_id: item.requirement_id || item.id || `REQ-${i + 1}`,
-      requirement_text: item.requirement_text || item.text || item.description || item.requirement || 'Sub-requirement',
-      status: item.status || 'missing',
-      evidence_found: item.evidence_found || item.evidence || item.evidence_text || null,
-      evidence_location: item.evidence_location || item.location || { start_index: -1, end_index: -1, section_context: null },
-      evidence_source: item.evidence_source || item.source_document || null,
-      analysis_notes: item.analysis_notes || item.notes || item.reasoning || item.analysis || null,
-      visual_description: item.visual_description || item.image_description || null,
-      gap_description: item.gap_description || item.gap || item.gaps || null,
-      confidence: parseFloat(item.confidence || item.confidence_score || 0.5),
-    }));
-
-    // Ensure top-level fields have safe defaults
-    analysis.confidence_score = parseFloat(analysis.confidence_score || 0);
-    analysis.compliance_percentage = parseInt(analysis.compliance_percentage || 0, 10);
-    analysis.summary = analysis.summary || '';
-    analysis.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
-    analysis.critical_gaps = Array.isArray(analysis.critical_gaps) ? analysis.critical_gaps : [];
+    normalizeGptAnalysis(analysis);
 
     console.log(`✅ GPT analysis complete: ${analysis.status} (${analysis.compliance_percentage}% compliance, confidence: ${analysis.confidence_score}, ${analysis.requirements_breakdown.length} sub-requirements)`);
 
@@ -471,37 +476,8 @@ async function analyzeImageEvidence(imageBase64, mimeType, requirementText, cont
       throw new Error('GPT returned invalid JSON response for image analysis');
     }
 
-    // Normalize — same logic as analyzeEvidence()
-    if (!analysis.status) {
-      analysis.status = 'non_compliant';
-    }
-
-    if (!analysis.requirements_breakdown) {
-      analysis.requirements_breakdown = analysis.breakdown || analysis.sub_requirements || analysis.requirements || [];
-    }
-    if (!Array.isArray(analysis.requirements_breakdown)) {
-      analysis.requirements_breakdown = analysis.requirements_breakdown ? [analysis.requirements_breakdown] : [];
-    }
-
-    analysis.requirements_breakdown = analysis.requirements_breakdown.map((item, i) => ({
-      requirement_id: item.requirement_id || item.id || `REQ-${i + 1}`,
-      requirement_text: item.requirement_text || item.text || item.description || 'Sub-requirement',
-      status: item.status || 'missing',
-      evidence_found: item.evidence_found || item.evidence || null,
-      evidence_location: item.evidence_location || { start_index: -1, end_index: -1, section_context: null },
-      evidence_source: item.evidence_source || null,
-      analysis_notes: item.analysis_notes || item.notes || item.reasoning || item.analysis || null,
-      visual_description: item.visual_description || item.image_description || null,
-      gap_description: item.gap_description || item.gap || null,
-      confidence: parseFloat(item.confidence || item.confidence_score || 0.5),
-    }));
-
-    analysis.confidence_score = parseFloat(analysis.confidence_score || 0);
-    analysis.compliance_percentage = parseInt(analysis.compliance_percentage || 0, 10);
-    analysis.summary = analysis.summary || '';
-    analysis.extracted_text = analysis.extracted_text || '';
-    analysis.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
-    analysis.critical_gaps = Array.isArray(analysis.critical_gaps) ? analysis.critical_gaps : [];
+    // Normalize — shared logic with analyzeEvidence()
+    normalizeGptAnalysis(analysis);
 
     console.log(`✅ GPT vision analysis complete: ${analysis.status} (${analysis.compliance_percentage}% compliance, OCR: ${analysis.extracted_text.length} chars)`);
 
@@ -979,4 +955,4 @@ async function enhanceFrameworkControls(controls, context = {}) {
   }
 }
 
-module.exports = { analyzeEvidence, analyzeImageEvidence, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls };
+module.exports = { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls };
