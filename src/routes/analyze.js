@@ -4,7 +4,7 @@ const router = express.Router();
 const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/supabase');
 const { parseDocument, parseDocumentForViewer } = require('../services/documentParser');
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
-const { analyzeEvidence } = require('../services/gpt');
+const { analyzeEvidence, buildMultiEvidenceUserPrompt } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore } = require('../utils/analysisHelpers');
@@ -515,6 +515,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
           critical_gaps: analysis.diff_data?.critical_gaps,
         },
       },
+      evidenceSources: analysis.diff_data?.evidence_sources || null,
       evidence: {
         id: evidence.id,
         fileName: evidence.file_name,
@@ -871,6 +872,194 @@ router.post('/group-by-ids/:evidenceId', async (req, res) => {
       error: 'Failed to start group analysis',
       details: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MULTI-EVIDENCE CONSOLIDATED ANALYSIS
+// Analyzes ALL evidence files attached to a control in one GPT call
+// ══════════════════════════════════════════════════════════════════════════════
+
+// POST /api/analyze/multi-evidence/:controlId — Consolidated multi-evidence analysis
+router.post('/multi-evidence/:controlId', async (req, res) => {
+  const tempFiles = [];
+
+  try {
+    const { controlId } = req.params;
+    console.log(`\n🔍 Starting MULTI-EVIDENCE analysis for control: ${controlId}`);
+
+    // 1. Fetch all evidence files linked to this control
+    const { data: evidenceFiles, error: evidenceError } = await supabase
+      .from('evidence')
+      .select('*')
+      .eq('control_id', controlId)
+      .order('uploaded_at', { ascending: true });
+
+    if (evidenceError) {
+      return res.status(500).json({ error: 'Failed to fetch evidence files', details: evidenceError.message });
+    }
+
+    if (!evidenceFiles || evidenceFiles.length === 0) {
+      return res.status(404).json({ error: 'No evidence files found for this control' });
+    }
+
+    console.log(`📎 Found ${evidenceFiles.length} evidence file(s) for control ${controlId}`);
+
+    // 2. Fetch control with framework
+    const { data: control, error: controlError } = await supabase
+      .from('controls')
+      .select('*, frameworks:framework_id (*)')
+      .eq('id', controlId)
+      .single();
+
+    if (controlError || !control) {
+      return res.status(404).json({ error: 'Control not found', details: controlError?.message });
+    }
+
+    const controlName = control.title || 'Unknown Control';
+    const requirementText = buildRequirementText(control, control.frameworks);
+
+    console.log(`📐 Control: ${controlName} (${control.control_number || ''})`);
+
+    // 3. Download and parse ALL documents in parallel
+    const parsedDocs = await Promise.all(evidenceFiles.map(async (ev) => {
+      const filePath = ev.file_path;
+      if (!filePath) {
+        console.warn(`⚠️ Evidence ${ev.id} (${ev.file_name}) has no file path — skipping`);
+        return null;
+      }
+
+      try {
+        const tempPath = await downloadFile(filePath);
+        tempFiles.push(tempPath);
+        const mimeType = ev.file_type || 'text/plain';
+        const text = await parseDocument(tempPath, mimeType);
+        return { evidence: ev, text };
+      } catch (parseErr) {
+        console.error(`❌ Failed to parse ${ev.file_name}: ${parseErr.message}`);
+        return null;
+      }
+    }));
+
+    // Filter out any that failed
+    const validDocs = parsedDocs.filter(Boolean);
+    if (validDocs.length === 0) {
+      return res.status(400).json({ error: 'Could not parse any evidence files' });
+    }
+
+    console.log(`📄 Successfully parsed ${validDocs.length} of ${evidenceFiles.length} documents`);
+
+    // 4. Concatenate documents with clear separators
+    const combinedText = validDocs.map((d, i) =>
+      `\n\n=== DOCUMENT ${i + 1}: ${d.evidence.file_name} ===\n\n${d.text}`
+    ).join('');
+
+    // 5. Token limit guard (~100K tokens ≈ 400K chars)
+    if (combinedText.length > 400000) {
+      return res.status(400).json({
+        error: 'Combined document text is too large for a single analysis',
+        combined_length: combinedText.length,
+        max_length: 400000,
+        hint: 'Try reducing the number of evidence files or splitting large documents',
+      });
+    }
+
+    // 6. Fetch custom instructions
+    const customInstructions = await fetchCustomInstructions(evidenceFiles[0].project_id);
+
+    // 7. Build multi-evidence prompt and call GPT
+    const documentNames = validDocs.map(d => d.evidence.file_name);
+    const userPromptOverride = buildMultiEvidenceUserPrompt(
+      combinedText, requirementText, controlName, customInstructions, documentNames
+    );
+
+    console.log(`🤖 Sending ${validDocs.length} documents (${combinedText.length} chars combined) to GPT for consolidated analysis...`);
+    const gptResult = await analyzeEvidence(combinedText, requirementText, controlName, customInstructions, { userPromptOverride });
+
+    // 8. Generate diff visualization
+    const diffData = generateDiff(gptResult.analysis, requirementText);
+
+    // Add evidence_sources to diff_data for multi-doc viewer
+    diffData.evidence_sources = validDocs.map(d => ({
+      id: d.evidence.id,
+      fileName: d.evidence.file_name,
+      fileType: d.evidence.file_type,
+      filePath: d.evidence.file_path,
+    }));
+
+    // 9. Save ONE consolidated analysis_results record
+    const analysisRecord = {
+      evidence_id: validDocs[0].evidence.id, // FK constraint: use first evidence
+      control_id: controlId,
+      project_id: evidenceFiles[0].project_id || null,
+      analyzed_at: new Date().toISOString(),
+      analysis_version: 'v1.0-multi',
+      model_used: gptResult.model || 'gpt-4o',
+      status: gptResult.analysis.status,
+      confidence_score: gptResult.analysis.confidence_score,
+      compliance_percentage: gptResult.analysis.compliance_percentage,
+      findings: gptResult.analysis,
+      diff_data: diffData,
+      summary: gptResult.analysis.summary,
+      recommendations: gptResult.analysis.recommendations || [],
+      raw_response: {
+        usage: gptResult.usage,
+        finish_reason: gptResult.finish_reason,
+        model: gptResult.model,
+      },
+    };
+
+    const { data: savedAnalysis, error: saveError } = await supabase
+      .from('analysis_results')
+      .insert(analysisRecord)
+      .select()
+      .single();
+
+    if (saveError) {
+      console.error('❌ Failed to save multi-evidence analysis:', saveError.message);
+      return res.status(200).json({
+        success: true,
+        warning: 'Analysis completed but failed to save to database',
+        analysis: gptResult.analysis,
+        diff_data: diffData,
+      });
+    }
+
+    console.log(`✅ Multi-evidence analysis saved: ${savedAnalysis.id} (${validDocs.length} docs consolidated)`);
+
+    // 10. Return consolidated result
+    res.json({
+      success: true,
+      analysis_id: savedAnalysis.id,
+      analysis_version: 'v1.0-multi',
+      analysis: gptResult.analysis,
+      diff_data: diffData,
+      control: {
+        id: control.id,
+        name: controlName,
+        control_number: control.control_number,
+        framework: control.frameworks?.name || null,
+      },
+      evidence_files: validDocs.map(d => ({
+        id: d.evidence.id,
+        name: d.evidence.file_name,
+      })),
+      metadata: {
+        model: gptResult.model,
+        tokens_used: gptResult.usage,
+        analyzed_at: savedAnalysis.analyzed_at,
+        documents_analyzed: validDocs.length,
+      },
+    });
+  } catch (err) {
+    console.error('❌ Multi-evidence analysis error:', err.message);
+    res.status(500).json({
+      error: 'Multi-evidence analysis failed',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  } finally {
+    // Clean up ALL temp files
+    tempFiles.forEach(f => cleanupFile(f));
   }
 });
 

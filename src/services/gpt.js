@@ -107,7 +107,66 @@ For evidence_location: Count the character position (0-indexed) where your quote
 Break the requirement into its natural sub-requirements — use as many or as few as the requirement warrants. Be precise about what evidence supports or contradicts each.`;
 }
 
-async function analyzeEvidence(documentText, requirementText, controlName, customInstructions) {
+/**
+ * Build a multi-evidence user prompt for consolidated analysis.
+ * Formats multiple documents into one prompt, telling GPT to cite which
+ * document each piece of evidence came from.
+ */
+function buildMultiEvidenceUserPrompt(combinedDocumentText, requirementText, controlName, customInstructions, documentNames) {
+  return `Analyze the following evidence documents against the compliance requirement.
+
+IMPORTANT: You are receiving ${documentNames.length} separate evidence documents combined together. Each document is delimited by "=== DOCUMENT N: filename ===" headers. When citing evidence, you MUST specify which document the evidence came from using the "evidence_source" field.
+
+## Control: ${controlName || 'Unnamed Control'}
+
+## Compliance Requirement:
+${requirementText}
+
+## Evidence Documents:
+${combinedDocumentText}
+${customInstructions ? `
+## Custom Analysis Instructions:
+The following project-level guidance MUST be applied to this analysis. These instructions take priority over default analysis behavior:
+${customInstructions}
+` : ''}
+## Output Format:
+Return a JSON object with this structure. Assess compliance across ALL documents combined — a requirement may be satisfied by evidence from any of the documents:
+
+{
+  "status": "compliant" | "partial" | "non_compliant",
+  "confidence_score": <number 0.0-1.0>,
+  "compliance_percentage": <number 0-100>,
+  "summary": "<concise summary of overall findings across ALL documents>",
+  "requirements_breakdown": [
+    {
+      "requirement_id": "<short ID like REQ-1>",
+      "requirement_text": "<the sub-requirement being tested>",
+      "status": "met" | "partial" | "missing",
+      "evidence_found": "<EXACT verbatim quote copied character-for-character from the document, or null if none>",
+      "evidence_source": "<EXACT filename of the document this evidence came from, e.g. '${documentNames[0] || 'document.pdf'}'>",
+      "evidence_location": {
+        "start_index": <0-indexed character position where the evidence_found quote begins in the combined Evidence Documents text above>,
+        "end_index": <0-indexed character position where the quote ends>,
+        "section_context": "<heading or section name where this evidence appears, or null>"
+      },
+      "gap_description": "<what is missing or null if fully met>",
+      "confidence": <number 0.0-1.0>
+    }
+  ],
+  "recommendations": ["<actionable recommendation>", ...],
+  "critical_gaps": ["<critical finding>", ...]
+}
+
+CRITICAL for evidence_found: You MUST copy the exact text from the document character-for-character. Do NOT paraphrase, summarize, or modify the quote in any way.
+
+CRITICAL for evidence_source: You MUST specify the exact filename of the document where each piece of evidence was found. Use the filenames from the "=== DOCUMENT N: filename ===" headers.
+
+For evidence_location: Count the character position (0-indexed) where your quoted evidence_found text starts and ends within the combined "Evidence Documents" section above (including the document separator headers). If you cannot determine the exact position, set start_index and end_index to -1.
+
+Break the requirement into its natural sub-requirements — use as many or as few as the requirement warrants. A sub-requirement can be satisfied by evidence from ANY of the documents.`;
+}
+
+async function analyzeEvidence(documentText, requirementText, controlName, customInstructions, { userPromptOverride } = {}) {
   // Input validation — fail fast with clear message instead of sending garbage to GPT
   if (!documentText || documentText.trim().length < 10) {
     throw new Error('Document text is empty or too short for meaningful analysis');
@@ -127,7 +186,7 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
       model: 'gpt-4o',
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt(documentText, requirementText, controlName, customInstructions) },
+        { role: 'user', content: userPromptOverride || buildUserPrompt(documentText, requirementText, controlName, customInstructions) },
       ],
       temperature: 0.2,
       max_tokens: 16384,
@@ -177,6 +236,7 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
       status: item.status || 'missing',
       evidence_found: item.evidence_found || item.evidence || item.evidence_text || null,
       evidence_location: item.evidence_location || item.location || { start_index: -1, end_index: -1, section_context: null },
+      evidence_source: item.evidence_source || item.source_document || null,
       gap_description: item.gap_description || item.gap || item.gaps || null,
       confidence: parseFloat(item.confidence || item.confidence_score || 0.5),
     }));
@@ -664,4 +724,4 @@ async function enhanceFrameworkControls(controls, context = {}) {
   }
 }
 
-module.exports = { analyzeEvidence, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls };
+module.exports = { analyzeEvidence, buildMultiEvidenceUserPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls };
