@@ -659,7 +659,34 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       };
     }
 
-    // 9. Return viewer response
+    // 9. Build response diff_data — rebuild from filtered findings for alternate evidence
+    let responseDiffData = {
+      requirement_coverage: analysis.diff_data?.requirement_coverage,
+      statistics: analysis.diff_data?.statistics,
+      side_by_side: analysis.diff_data?.side_by_side,
+      recommendations: analysis.diff_data?.recommendations || [],
+      critical_gaps: analysis.diff_data?.critical_gaps || [],
+    };
+
+    if (isAlternateEvidence && responseFindings?.requirements_breakdown?.length > 0) {
+      const filteredAnalysis = {
+        status: responseStatus,
+        compliance_percentage: responseCompliance,
+        confidence_score: responseConfidence,
+        requirements_breakdown: responseFindings.requirements_breakdown,
+      };
+      const rebuiltDiff = generateDiff(filteredAnalysis, analysis.diff_data?.original_requirement || '');
+      responseDiffData = {
+        requirement_coverage: rebuiltDiff.requirement_coverage,
+        statistics: rebuiltDiff.statistics,
+        side_by_side: rebuiltDiff.side_by_side,
+        recommendations: analysis.diff_data?.recommendations || [],
+        critical_gaps: analysis.diff_data?.critical_gaps || [],
+      };
+      console.log(`🔄 [Viewer] Rebuilt diff_data for ${activeEvidence.file_name}: ${rebuiltDiff.statistics.total_requirements} requirements, ${rebuiltDiff.statistics.met_count} met`);
+    }
+
+    // 10. Return viewer response
     res.json({
       success: true,
       viewer: {
@@ -678,13 +705,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
         confidence_score: responseConfidence,
         summary: responseSummary,
         findings: responseFindings,
-        diff_data: {
-          requirement_coverage: analysis.diff_data?.requirement_coverage,
-          statistics: analysis.diff_data?.statistics,
-          side_by_side: analysis.diff_data?.side_by_side,
-          recommendations: analysis.diff_data?.recommendations,
-          critical_gaps: analysis.diff_data?.critical_gaps,
-        },
+        diff_data: responseDiffData,
       },
       evidenceSources: sources.length > 0 ? sources : null,
       evidence: {
