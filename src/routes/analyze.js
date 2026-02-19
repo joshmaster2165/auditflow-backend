@@ -881,8 +881,10 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
 
   try {
     const { parentControlId } = req.params;
-    const { controlIds: explicitIds } = req.body || {};
+    const { controlIds: explicitIds, evidenceIds: explicitEvidenceIds } = req.body || {};
     console.log(`\n🔍 Starting ANALYZE-ALL for control: ${parentControlId}`);
+    if (explicitIds) console.log(`📋 Explicit controlIds: ${explicitIds.length}`);
+    if (explicitEvidenceIds) console.log(`📋 Explicit evidenceIds: ${explicitEvidenceIds.length}`);
 
     // 1. Fetch the reference control with framework
     const { data: parentControl, error: parentError } = await supabase
@@ -948,23 +950,42 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     console.log(`📐 Reference: ${parentControl.control_number} - ${parentControl.title}`);
     console.log(`🔗 ${controlsToAnalyze.length} controls to analyze (strategy: ${matchStrategy})`);
 
-    // 3. Fetch evidence — try parent control first, then all controls in the group
-    const controlIdsForEvidence = [parentControlId, ...controlsToAnalyze.map(c => c.id)];
-    const uniqueIds = [...new Set(controlIdsForEvidence)];
+    // 3. Fetch evidence — explicit IDs first, then from all controls in the group
+    let evidenceFiles = [];
 
-    const { data: evidenceFiles, error: evidenceError } = await supabase
-      .from('evidence')
-      .select('*')
-      .in('control_id', uniqueIds)
-      .order('uploaded_at', { ascending: true });
+    if (explicitEvidenceIds && Array.isArray(explicitEvidenceIds) && explicitEvidenceIds.length > 0) {
+      // --- Mode: Explicit evidence IDs from frontend ---
+      const { data: explicitEvidence, error: explicitEvError } = await supabase
+        .from('evidence')
+        .select('*')
+        .in('id', explicitEvidenceIds)
+        .order('uploaded_at', { ascending: true });
 
-    if (evidenceError) {
-      return res.status(500).json({ error: 'Failed to fetch evidence files', details: evidenceError.message });
+      if (!explicitEvError && explicitEvidence) {
+        evidenceFiles = explicitEvidence;
+      }
+      console.log(`📎 ${evidenceFiles.length} evidence file(s) from explicit IDs`);
+    } else {
+      // --- Fallback: Fetch from all controls in the group ---
+      const controlIdsForEvidence = [parentControlId, ...controlsToAnalyze.map(c => c.id)];
+      const uniqueIds = [...new Set(controlIdsForEvidence)];
+
+      const { data: groupEvidence, error: evidenceError } = await supabase
+        .from('evidence')
+        .select('*')
+        .in('control_id', uniqueIds)
+        .order('uploaded_at', { ascending: true });
+
+      if (evidenceError) {
+        return res.status(500).json({ error: 'Failed to fetch evidence files', details: evidenceError.message });
+      }
+      evidenceFiles = groupEvidence || [];
+      console.log(`📎 ${evidenceFiles.length} evidence file(s) from control group`);
     }
 
     if (!evidenceFiles || evidenceFiles.length === 0) {
       return res.status(404).json({
-        error: 'No evidence files found. Upload evidence to this category before validating.',
+        error: 'No evidence files found. Upload evidence before validating.',
       });
     }
 

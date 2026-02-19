@@ -477,11 +477,11 @@ async function findChildControls(parentControl, selectFields = '*, frameworks:fr
       .select(selectFields)
       .eq('framework_id', frameworkId)
       .or(categoryFilters.join(','))
-      .neq('id', parentId)
       .order('sort_order', { ascending: true });
 
-    if (!catError && catChildren && catChildren.length > 0) {
-      console.log(`🔗 Found ${catChildren.length} children via category match`);
+    // For category match, include ALL peers (don't exclude the reference control)
+    if (!catError && catChildren && catChildren.length > 1) {
+      console.log(`🔗 Found ${catChildren.length} peers via category match (including reference)`);
       return { childControls: catChildren, matchStrategy: 'category' };
     }
   }
@@ -495,7 +495,6 @@ async function findChildControls(parentControl, selectFields = '*, frameworks:fr
       .select(selectFields)
       .eq('framework_id', frameworkId)
       .like('control_number', `${controlNumber}.%`)
-      .neq('id', parentId)
       .order('sort_order', { ascending: true });
 
     if (!prefixError && prefixChildren && prefixChildren.length > 0) {
