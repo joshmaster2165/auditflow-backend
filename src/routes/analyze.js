@@ -868,52 +868,6 @@ router.post('/group-by-ids/:evidenceId', async (req, res) => {
 // All evidence from parent + all child requirements → one GPT call
 // ══════════════════════════════════════════════════════════════════════════════
 
-// GET /api/analyze/debug-controls/:controlId — Debug: show control and siblings
-router.get('/debug-controls/:controlId', async (req, res) => {
-  try {
-    const { controlId } = req.params;
-
-    // Fetch the specified control (use * to avoid guessing column names)
-    const { data: control, error: controlError } = await supabase
-      .from('controls')
-      .select('*')
-      .eq('id', controlId)
-      .single();
-
-    if (controlError || !control) {
-      return res.status(404).json({ error: 'Control not found', details: controlError?.message });
-    }
-
-    // Fetch ALL controls in the same framework to understand the structure
-    const { data: allControls, error: allError } = await supabase
-      .from('controls')
-      .select('*')
-      .eq('framework_id', control.framework_id)
-      .order('sort_order', { ascending: true });
-
-    // Show all columns that exist on the first control to reveal schema
-    const sampleColumns = allControls?.[0] ? Object.keys(allControls[0]) : [];
-
-    res.json({
-      target_control: control,
-      framework_id: control.framework_id,
-      total_controls: allControls?.length || 0,
-      schema_columns: sampleColumns,
-      all_controls: (allControls || []).map(c => ({
-        id: c.id,
-        control_number: c.control_number,
-        title: c.title,
-        category: c.category,
-        parent_control_number: c.parent_control_number,
-        level: c.level,
-        sort_order: c.sort_order,
-      })),
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // POST /api/analyze/analyze-all/:parentControlId — Validate all controls in a category at once
 //
 // Supports TWO modes:
