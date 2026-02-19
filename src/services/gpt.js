@@ -49,10 +49,13 @@ Your task is to analyze whether evidence documents satisfy specific compliance r
 
 1. Break down the requirement into its testable sub-requirements (as many or as few as appropriate for the requirement)
 2. For each sub-requirement, determine if it is met, partially met, or missing based on the evidence
-3. Quote specific evidence passages that support your findings — copy text EXACTLY character-for-character from the document
-4. Identify gaps where evidence is insufficient
-5. Provide actionable recommendations
-6. For each evidence passage found, provide the exact character offset location within the document text to enable visual highlighting in the document viewer
+3. Quote specific evidence passages that support your findings — copy text EXACTLY character-for-character from the document when possible
+4. Explain your analysis reasoning — describe HOW the evidence supports or fails to meet each sub-requirement
+5. Identify gaps where evidence is insufficient and explain why they matter
+6. Provide actionable recommendations
+7. For each evidence passage found, provide the exact character offset location within the document text to enable visual highlighting in the document viewer
+
+Your analysis should be thorough and explanatory. Don't just state whether something is met or missing — explain your reasoning so an auditor can understand your assessment.
 
 If the user provides custom analysis instructions, you MUST follow them. They take priority over default analysis behavior and may adjust what you focus on, how detailed your analysis is, or how you format your recommendations.
 
@@ -86,13 +89,14 @@ Return a JSON object with this structure. Adapt the depth and detail to what is 
       "requirement_id": "<short ID like REQ-1>",
       "requirement_text": "<the sub-requirement being tested>",
       "status": "met" | "partial" | "missing",
-      "evidence_found": "<EXACT verbatim quote copied character-for-character from the document, or null if none>",
+      "evidence_found": "<EXACT verbatim quote copied character-for-character from the document, or null if none. If the evidence is contextual rather than a direct quote, describe what in the document supports this finding.>",
+      "analysis_notes": "<your analysis reasoning: explain WHY you rated this status, HOW the evidence connects to the requirement, and what the evidence demonstrates about compliance. This should help an auditor understand your assessment.>",
       "evidence_location": {
         "start_index": <0-indexed character position where the evidence_found quote begins in the Evidence Document Content above>,
         "end_index": <0-indexed character position where the quote ends>,
         "section_context": "<heading or section name where this evidence appears, or null>"
       },
-      "gap_description": "<what is missing or null if fully met>",
+      "gap_description": "<what is missing and WHY it matters for compliance, or null if fully met>",
       "confidence": <number 0.0-1.0>
     }
   ],
@@ -100,7 +104,9 @@ Return a JSON object with this structure. Adapt the depth and detail to what is 
   "critical_gaps": ["<critical finding>", ...]
 }
 
-CRITICAL for evidence_found: You MUST copy the exact text from the document character-for-character. Do NOT paraphrase, summarize, or modify the quote in any way. Include enough surrounding context (at least 1-2 full sentences) to make the highlighted passage meaningful in the document viewer.
+For evidence_found: Prefer copying exact text from the document character-for-character when possible. Include enough surrounding context (at least 1-2 full sentences) to make the highlighted passage meaningful in the document viewer. If the evidence is more contextual or spread across sections, describe what you found.
+
+For analysis_notes: This is REQUIRED for every sub-requirement. Explain your reasoning — how does this specific evidence demonstrate (or fail to demonstrate) compliance? What does it tell an auditor? This is where you provide the analytical insight.
 
 For evidence_location: Count the character position (0-indexed) where your quoted evidence_found text starts and ends within the "Evidence Document Content" section above. If you cannot determine the exact position, set start_index and end_index to -1 and section_context to null.
 
@@ -142,14 +148,15 @@ Return a JSON object with this structure. Assess compliance across ALL documents
       "requirement_id": "<short ID like REQ-1>",
       "requirement_text": "<the sub-requirement being tested>",
       "status": "met" | "partial" | "missing",
-      "evidence_found": "<EXACT verbatim quote copied character-for-character from the document, or null if none>",
+      "evidence_found": "<EXACT verbatim quote copied character-for-character from the document when possible, or describe what in the document supports this finding>",
       "evidence_source": "<EXACT filename of the document this evidence came from, e.g. '${documentNames[0] || 'document.pdf'}'>",
+      "analysis_notes": "<your analysis reasoning: explain HOW this evidence supports or fails to meet the requirement, and what it demonstrates about compliance>",
       "evidence_location": {
         "start_index": <0-indexed character position where the evidence_found quote begins in the combined Evidence Documents text above>,
         "end_index": <0-indexed character position where the quote ends>,
         "section_context": "<heading or section name where this evidence appears, or null>"
       },
-      "gap_description": "<what is missing or null if fully met>",
+      "gap_description": "<what is missing and WHY it matters for compliance, or null if fully met>",
       "confidence": <number 0.0-1.0>
     }
   ],
@@ -157,9 +164,11 @@ Return a JSON object with this structure. Assess compliance across ALL documents
   "critical_gaps": ["<critical finding>", ...]
 }
 
-CRITICAL for evidence_found: You MUST copy the exact text from the document character-for-character. Do NOT paraphrase, summarize, or modify the quote in any way.
+For evidence_found: Prefer copying exact text from the document character-for-character. If the evidence is more contextual, describe what you found.
 
 CRITICAL for evidence_source: You MUST specify the exact filename of the document where each piece of evidence was found. Use the filenames from the "=== DOCUMENT N: filename ===" headers.
+
+For analysis_notes: REQUIRED for every sub-requirement. Explain your reasoning — how does this evidence demonstrate compliance?
 
 For evidence_location: Count the character position (0-indexed) where your quoted evidence_found text starts and ends within the combined "Evidence Documents" section above (including the document separator headers). If you cannot determine the exact position, set start_index and end_index to -1.
 
@@ -213,9 +222,10 @@ Return a JSON object. You MUST evaluate every control listed above. For each con
           "requirement_id": "<short ID like REQ-1>",
           "requirement_text": "<the sub-requirement being tested>",
           "status": "met" | "partial" | "missing",
-          "evidence_found": "<EXACT verbatim quote copied character-for-character from a document, or null>",
+          "evidence_found": "<copy exact text from the document when possible. If the evidence is contextual rather than a direct quote, describe what in the document supports this finding. For images, describe the specific visual evidence.>",
           "evidence_source": "<exact filename of the document this evidence came from>",
-          "gap_description": "<what is missing, or null if fully met>",
+          "analysis_notes": "<your analysis reasoning: explain WHY you rated this status, HOW the evidence connects to the requirement, and what the evidence demonstrates about compliance.>",
+          "gap_description": "<what is missing AND why it matters for compliance, or null if fully met>",
           "confidence": <number 0.0-1.0>
         }
       ],
@@ -226,8 +236,9 @@ Return a JSON object. You MUST evaluate every control listed above. For each con
 }
 
 CRITICAL: You MUST include ALL ${controls.length} controls in the "controls" array — one entry per control listed above.
-CRITICAL for evidence_found: Copy text EXACTLY character-for-character from the document. Do NOT paraphrase.
+CRITICAL for evidence_found: Copy exact text from the document when possible. If evidence is contextual, describe what supports the finding.
 CRITICAL for evidence_source: Specify the exact filename from the "=== DOCUMENT N: filename ===" headers.
+CRITICAL for analysis_notes: Provide thorough reasoning for each finding — explain how the evidence connects to the requirement and why you rated it met/partial/missing.
 
 Each control should be evaluated independently. A piece of evidence in any document can satisfy requirements for multiple controls.`;
 }
@@ -303,6 +314,8 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
       evidence_found: item.evidence_found || item.evidence || item.evidence_text || null,
       evidence_location: item.evidence_location || item.location || { start_index: -1, end_index: -1, section_context: null },
       evidence_source: item.evidence_source || item.source_document || null,
+      analysis_notes: item.analysis_notes || item.notes || item.reasoning || item.analysis || null,
+      visual_description: item.visual_description || item.image_description || null,
       gap_description: item.gap_description || item.gap || item.gaps || null,
       confidence: parseFloat(item.confidence || item.confidence_score || 0.5),
     }));
@@ -334,11 +347,15 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
 const IMAGE_SYSTEM_PROMPT = `You are an expert compliance auditor specializing in analyzing visual evidence — screenshots, photos, scanned documents, and images — against compliance requirements.
 
 Your task is to:
-1. Extract ALL readable text from the image (OCR). Include every piece of text you can see, preserving structure where possible.
-2. Analyze both the visual content and extracted text against the compliance requirement.
-3. For screenshots of system configurations, verify specific settings and values visible in the image.
-4. For photos of physical security controls, assess whether the controls shown meet the requirement.
-5. For scanned documents, extract the text and analyze it like a regular document.
+1. Describe in detail what you observe in the image — UI elements, configuration panels, settings, text, labels, system state, dialog boxes, physical controls, or any other visual elements.
+2. Extract ALL readable text from the image (OCR). Include every piece of text you can see, preserving structure where possible.
+3. Analyze both the visual content and extracted text against the compliance requirement.
+4. For screenshots of system configurations, describe the UI you see and verify specific settings and values visible.
+5. For photos of physical security controls, describe what you see and assess whether the controls shown meet the requirement.
+6. For scanned documents, extract the text and analyze it like a regular document.
+7. Explain HOW what you see in the image relates to the compliance requirement — don't just state met/missing, explain your reasoning.
+
+Your analysis should paint a clear picture for an auditor who hasn't seen the image. Describe what you observe, what it means, and how it relates to the requirement.
 
 If the user provides custom analysis instructions, you MUST follow them. They take priority over default analysis behavior.
 
@@ -370,13 +387,15 @@ Return a JSON object with this structure:
       "requirement_id": "<short ID like REQ-1>",
       "requirement_text": "<the sub-requirement being tested>",
       "status": "met" | "partial" | "missing",
-      "evidence_found": "<quote relevant text visible in the image, or describe the visual evidence seen>",
+      "evidence_found": "<describe the specific visual evidence that addresses this requirement — what you see in the image that constitutes evidence (e.g., 'Firewall admin panel shows port 22 blocked in rule #47 with deny action')>",
+      "visual_description": "<detailed description of what you observe in the image related to this requirement: UI elements, panels, settings, labels, indicators, physical elements, system state>",
+      "analysis_notes": "<your analysis reasoning: explain HOW what you see in the image supports or fails to meet this requirement, and what it tells an auditor about compliance>",
       "evidence_location": {
         "start_index": -1,
         "end_index": -1,
         "section_context": "<describe where in the image this evidence is located>"
       },
-      "gap_description": "<what is missing or null if fully met>",
+      "gap_description": "<what is missing and WHY it matters for compliance, or null if fully met>",
       "confidence": <number 0.0-1.0>
     }
   ],
@@ -385,7 +404,9 @@ Return a JSON object with this structure:
 }
 
 CRITICAL: Include the "extracted_text" field with ALL text you can read from the image.
-For evidence_found: quote text visible in the image, or describe visual evidence (e.g., "Screenshot shows firewall rule blocking port 22").
+For visual_description: Describe what you SEE — paint a picture for an auditor who hasn't viewed the image. Include UI layout, visible settings, configuration states, labels, indicators, or physical elements.
+For evidence_found: Describe the specific visual evidence that addresses the requirement. Be concrete about what you observe.
+For analysis_notes: Explain your reasoning — HOW does what you see support or fail to support compliance? What does it tell an auditor?
 For evidence_location: always use start_index: -1 and end_index: -1 since this is an image. Use section_context to describe the location within the image.`;
 }
 
@@ -463,6 +484,8 @@ async function analyzeImageEvidence(imageBase64, mimeType, requirementText, cont
       evidence_found: item.evidence_found || item.evidence || null,
       evidence_location: item.evidence_location || { start_index: -1, end_index: -1, section_context: null },
       evidence_source: item.evidence_source || null,
+      analysis_notes: item.analysis_notes || item.notes || item.reasoning || item.analysis || null,
+      visual_description: item.visual_description || item.image_description || null,
       gap_description: item.gap_description || item.gap || null,
       confidence: parseFloat(item.confidence || item.confidence_score || 0.5),
     }));

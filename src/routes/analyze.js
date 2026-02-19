@@ -8,7 +8,7 @@ const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
 const { analyzeEvidence, analyzeImageEvidence, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
-const { createJobStore } = require('../utils/analysisHelpers');
+const { createJobStore, buildPerEvidenceBreakdown } = require('../utils/analysisHelpers');
 
 // ── In-memory job store for async group analysis ──
 const jobs = createJobStore({ processingTimeoutMs: 20 * 60 * 1000 });
@@ -551,13 +551,20 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       let filteredBreakdown = breakdown;
 
       if (isAlternateEvidence) {
-        // Only match highlights for findings that reference this specific document
-        filteredBreakdown = breakdown.filter(item => {
-          const src = (item.evidence_source || '').toLowerCase();
-          const fileName = (activeEvidence.file_name || '').toLowerCase();
-          return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
-        });
-        console.log(`🔍 [Viewer] Filtered to ${filteredBreakdown.length} of ${breakdown.length} findings for ${activeEvidence.file_name}`);
+        const perEvidence = analysis.findings?.per_evidence_breakdown;
+        if (perEvidence && perEvidence[activeEvidence.id] && perEvidence[activeEvidence.id].length > 0) {
+          // Direct lookup by evidence_id
+          filteredBreakdown = perEvidence[activeEvidence.id];
+          console.log(`🔍 [Viewer] Highlight direct lookup: ${filteredBreakdown.length} findings for evidence ${activeEvidence.id}`);
+        } else {
+          // Fuzzy fallback for old analyses
+          filteredBreakdown = breakdown.filter(item => {
+            const src = (item.evidence_source || '').toLowerCase();
+            const fileName = (activeEvidence.file_name || '').toLowerCase();
+            return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
+          });
+          console.log(`🔍 [Viewer] Highlight fuzzy fallback: ${filteredBreakdown.length} of ${breakdown.length} findings for ${activeEvidence.file_name}`);
+        }
       }
 
       highlightRanges = verifyAndBuildHighlightRanges(documentText, filteredBreakdown);
@@ -611,14 +618,23 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
 
     if (isAlternateEvidence) {
       const fullBreakdown = analysis.findings?.requirements_breakdown || [];
-      const matchesActiveFile = (item) => {
-        const src = (item.evidence_source || '').toLowerCase();
-        const fileName = (activeEvidence.file_name || '').toLowerCase();
-        return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
-      };
+      const perEvidence = analysis.findings?.per_evidence_breakdown;
+      let filteredRequirements;
 
-      const filteredRequirements = fullBreakdown.filter(matchesActiveFile);
-      console.log(`📊 [Viewer] Filtered analysis to ${filteredRequirements.length} of ${fullBreakdown.length} findings for ${activeEvidence.file_name}`);
+      if (perEvidence && perEvidence[activeEvidence.id] && perEvidence[activeEvidence.id].length > 0) {
+        // ── NEW: Direct lookup by evidence_id — reliable, no filename matching needed ──
+        filteredRequirements = perEvidence[activeEvidence.id];
+        console.log(`📊 [Viewer] Direct lookup: ${filteredRequirements.length} findings for evidence ${activeEvidence.id} (${activeEvidence.file_name})`);
+      } else {
+        // ── FALLBACK: Legacy fuzzy matching for old analyses without per_evidence_breakdown ──
+        const matchesActiveFile = (item) => {
+          const src = (item.evidence_source || '').toLowerCase();
+          const fileName = (activeEvidence.file_name || '').toLowerCase();
+          return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
+        };
+        filteredRequirements = fullBreakdown.filter(matchesActiveFile);
+        console.log(`📊 [Viewer] Fuzzy fallback: ${filteredRequirements.length} of ${fullBreakdown.length} findings for ${activeEvidence.file_name}`);
+      }
 
       // Recompute status and stats from filtered findings
       if (filteredRequirements.length > 0) {
@@ -1316,12 +1332,19 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
           evidence_found: item.evidence_found || null,
           evidence_source: item.evidence_source || null,
           evidence_location: item.evidence_location || { start_index: -1, end_index: -1, section_context: null },
+          analysis_notes: item.analysis_notes || item.notes || item.reasoning || null,
+          visual_description: item.visual_description || item.image_description || null,
           gap_description: item.gap_description || null,
           confidence: parseFloat(item.confidence || 0.5),
         })),
         recommendations: Array.isArray(gptCtrl.recommendations) ? gptCtrl.recommendations : [],
         critical_gaps: Array.isArray(gptCtrl.critical_gaps) ? gptCtrl.critical_gaps : [],
       };
+
+      // Build per-evidence breakdown for reliable tab switching
+      controlAnalysis.per_evidence_breakdown = buildPerEvidenceBreakdown(
+        controlAnalysis.requirements_breakdown || [], allEvidenceForSources
+      );
 
       const requirementText = buildRequirementText(child, child.frameworks);
       const diffData = generateDiff(controlAnalysis, requirementText);
@@ -1586,6 +1609,8 @@ router.post('/multi-evidence/:controlId', async (req, res) => {
         evidence_found: item.evidence_found || null,
         evidence_source: item.evidence_source || null,
         evidence_location: item.evidence_location || { start_index: -1, end_index: -1, section_context: null },
+        analysis_notes: item.analysis_notes || item.notes || item.reasoning || null,
+        visual_description: item.visual_description || item.image_description || null,
         gap_description: item.gap_description || null,
         confidence: parseFloat(item.confidence || 0.5),
       }));
@@ -1627,7 +1652,12 @@ router.post('/multi-evidence/:controlId', async (req, res) => {
       diffData.has_images = true;
     }
 
-    // 9. Save ONE consolidated analysis_results record
+    // 9. Build per-evidence breakdown for reliable tab switching in the viewer
+    gptResult.analysis.per_evidence_breakdown = buildPerEvidenceBreakdown(
+      gptResult.analysis.requirements_breakdown || [], allEvidence
+    );
+
+    // 10. Save ONE consolidated analysis_results record
     const firstEvidence = parsedTextDocs[0]?.evidence || parsedImageDocs[0]?.evidence;
     const analysisRecord = {
       evidence_id: firstEvidence.id, // FK constraint: use first evidence

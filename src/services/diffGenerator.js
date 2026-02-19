@@ -37,6 +37,8 @@ function generateRequirementCoverage(breakdown) {
       evidence: req.evidence_found,
       gap: req.gap_description,
       confidence: req.confidence,
+      analysis_notes: req.analysis_notes || null,
+      visual_description: req.visual_description || null,
     });
   }
 
@@ -51,6 +53,8 @@ function generateSideBySide(breakdown) {
     status: req.status,
     gap: req.gap_description,
     confidence: req.confidence,
+    analysis_notes: req.analysis_notes || null,
+    visual_description: req.visual_description || null,
   }));
 }
 
@@ -66,6 +70,7 @@ function generateTimelineView(breakdown) {
       ? req.evidence_found.substring(0, 150) + (req.evidence_found.length > 150 ? '...' : '')
       : null,
     gap: req.gap_description,
+    analysis_notes: req.analysis_notes || null,
   }));
 }
 
@@ -209,6 +214,8 @@ function generateHtmlExport(diffData, metadata = {}) {
           ${escapeHtml(item.id)}: ${escapeHtml(item.required)}
         </div>
         <div class="evidence-text" style="margin-bottom: 0.25rem;">Evidence: ${escapeHtml(item.found)}</div>
+        ${item.analysis_notes ? `<div style="color: #4b5563; font-size: 0.85rem; margin-bottom: 0.25rem; padding: 0.5rem; background: #f9fafb; border-radius: 4px;"><strong>Analysis:</strong> ${escapeHtml(item.analysis_notes)}</div>` : ''}
+        ${item.visual_description ? `<div style="color: #6366f1; font-size: 0.85rem; margin-bottom: 0.25rem;"><strong>Visual Description:</strong> ${escapeHtml(item.visual_description)}</div>` : ''}
         ${item.gap ? `<div class="gap-text">Gap: ${escapeHtml(item.gap)}</div>` : ''}
       </div>`).join('')}
     </div>
