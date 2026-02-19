@@ -123,6 +123,137 @@ function computeGroupAggregate(results) {
 }
 
 /**
+ * Shared analysis loop: download evidence, parse, analyze each control, aggregate, complete job.
+ * Used by both runGroupAnalysis and runGroupAnalysisByIds to avoid code duplication.
+ *
+ * @param {Object} params
+ * @param {string} params.jobId - UUID of the job
+ * @param {Object} params.evidence - Evidence record from Supabase
+ * @param {Array} params.childControls - Controls to analyze
+ * @param {Map} params.jobs - In-memory job store
+ * @param {string} params.logPrefix - Log prefix (e.g. "Group" or "GroupByIds")
+ * @param {Object} params.resultExtras - Extra fields to merge into the job result (e.g. parentControl, controlIds)
+ * @param {string|null} params.customInstructions - Project-level custom instructions
+ */
+async function executeGroupAnalysisLoop({ jobId, evidence, childControls, jobs, logPrefix, resultExtras, customInstructions }) {
+  let tempFilePath = null;
+  const startTime = Date.now();
+
+  try {
+    const job = jobs.get(jobId);
+
+    console.log(`📊 [${logPrefix}] ${childControls.length} controls to analyze`);
+
+    // Update job with control count
+    if (job) {
+      job.controlsTotal = childControls.length;
+      job.controlsCompleted = 0;
+    }
+
+    // Download evidence file — ONCE
+    const filePath = evidence.file_path || evidence.storage_path;
+    if (!filePath) {
+      throw new Error('Evidence record has no file path');
+    }
+
+    if (job) job.progress = 'Downloading evidence file...';
+    tempFilePath = await downloadFile(filePath);
+
+    // Parse document — ONCE (or read image as base64)
+    if (job) job.progress = 'Parsing document...';
+    const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
+
+    let documentText = null;
+    let imageContent = null;
+
+    if (isImageType(mimeType)) {
+      const imageBase64 = fs.readFileSync(tempFilePath).toString('base64');
+      imageContent = { base64: imageBase64, mimeType };
+      console.log(`🖼️ [${logPrefix}] Image evidence (${Math.round(imageBase64.length / 1024)}KB base64)`);
+    } else {
+      documentText = await parseDocument(tempFilePath, mimeType);
+      console.log(`📄 [${logPrefix}] Document parsed: ${documentText.length} chars`);
+    }
+
+    // Analyze each control sequentially
+    const results = [];
+    const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+
+    for (let i = 0; i < childControls.length; i++) {
+      const ctrl = childControls[i];
+      const controlName = ctrl.title || `Control ${ctrl.control_number}`;
+
+      const progressMsg = `Analyzing control ${i + 1} of ${childControls.length} (${ctrl.control_number} - ${controlName})`;
+      if (job) {
+        job.progress = progressMsg;
+        job.controlsCompleted = i;
+      }
+
+      const result = await analyzeControlWithRetry({
+        control: ctrl,
+        documentText,
+        customInstructions,
+        evidenceId: evidence.id,
+        projectId: evidence.project_id,
+        buildRequirementText,
+        logPrefix,
+        imageContent,
+      });
+
+      results.push(result);
+
+      if (result.usage) {
+        totalUsage.prompt_tokens += result.usage.prompt_tokens || 0;
+        totalUsage.completion_tokens += result.usage.completion_tokens || 0;
+        totalUsage.total_tokens += result.usage.total_tokens || 0;
+      }
+
+      if (result.status !== 'error') {
+        console.log(`✅ [${logPrefix}] ${ctrl.control_number}: ${result.status} (${result.compliance_percentage}%)`);
+      } else {
+        console.error(`❌ [${logPrefix}] ${ctrl.control_number}: ${result.error}`);
+      }
+    }
+
+    // Compute aggregate statistics
+    const aggregate = computeGroupAggregate(results);
+    const durationSeconds = Math.round((Date.now() - startTime) / 1000);
+
+    console.log(`\n🏁 [${logPrefix}] Complete: ${results.length} controls analyzed in ${durationSeconds}s`);
+    console.log(`📊 [${logPrefix}] Aggregate: ${aggregate.overall_status} (${aggregate.average_compliance_percentage}% avg)`);
+
+    // Update job as completed
+    jobs.set(jobId, {
+      status: 'completed',
+      completedAt: Date.now(),
+      result: {
+        aggregate,
+        results,
+        ...resultExtras,
+        evidence: {
+          id: evidence.id,
+          name: evidence.file_name,
+        },
+        metadata: {
+          total_tokens_used: totalUsage,
+          duration_seconds: durationSeconds,
+          analyzed_at: new Date().toISOString(),
+        },
+      },
+    });
+  } catch (err) {
+    console.error(`💥 [${logPrefix}] Fatal error: ${err.message}`);
+    jobs.set(jobId, {
+      status: 'failed',
+      completedAt: Date.now(),
+      error: err.message,
+    });
+  } finally {
+    cleanupFile(tempFilePath);
+  }
+}
+
+/**
  * Run group analysis: analyze one evidence file against all child controls of a parent.
  * Updates the job Map with progress and final results.
  *
@@ -131,12 +262,7 @@ function computeGroupAggregate(results) {
  * @param {Map} jobs - In-memory job store
  */
 async function runGroupAnalysis(jobId, evidenceId, jobs) {
-  let tempFilePath = null;
-  const startTime = Date.now();
-
   try {
-    const job = jobs.get(jobId);
-
     // 1. Fetch evidence record with joined control and framework
     const { data: evidence, error: evidenceError } = await supabase
       .from('evidence')
@@ -160,7 +286,6 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
       throw new Error('Evidence has no linked control (control_id is null)');
     }
 
-    // Fetch project-level custom instructions (once, before the loop)
     const customInstructions = await fetchCustomInstructions(evidence.project_id);
 
     console.log(`📋 [Group ${jobId}] Parent: ${parentControl.control_number} - ${parentControl.title}`);
@@ -176,109 +301,19 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
 
     console.log(`📊 [Group ${jobId}] Matched via: ${matchStrategy}`);
 
-    console.log(`📊 [Group ${jobId}] Found ${childControls.length} child controls`);
-
-    // Update job with child count
-    if (job) {
-      job.controlsTotal = childControls.length;
-      job.controlsCompleted = 0;
-    }
-
-    // 4. Download evidence file — ONCE
-    const filePath = evidence.file_path || evidence.storage_path;
-    if (!filePath) {
-      throw new Error('Evidence record has no file path');
-    }
-
-    if (job) job.progress = 'Downloading evidence file...';
-    tempFilePath = await downloadFile(filePath);
-
-    // 5. Parse document — ONCE (or read image as base64)
-    if (job) job.progress = 'Parsing document...';
-    const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
-
-    let documentText = null;
-    let imageContent = null;
-
-    if (isImageType(mimeType)) {
-      // Image evidence — read as base64 once, pass to each control analysis
-      const imageBase64 = fs.readFileSync(tempFilePath).toString('base64');
-      imageContent = { base64: imageBase64, mimeType };
-      console.log(`🖼️ [Group ${jobId}] Image evidence (${Math.round(imageBase64.length / 1024)}KB base64)`);
-    } else {
-      documentText = await parseDocument(tempFilePath, mimeType);
-      console.log(`📄 [Group ${jobId}] Document parsed: ${documentText.length} chars`);
-    }
-
-    // 6. Analyze each child control sequentially using shared helper
-    const results = [];
-    const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-
-    for (let i = 0; i < childControls.length; i++) {
-      const child = childControls[i];
-      const controlName = child.title || `Control ${child.control_number}`;
-
-      const progressMsg = `Analyzing control ${i + 1} of ${childControls.length} (${child.control_number} - ${controlName})`;
-      console.log(`🔍 [Group ${jobId}] ${progressMsg}`);
-
-      if (job) {
-        job.progress = progressMsg;
-        job.controlsCompleted = i;
-      }
-
-      const result = await analyzeControlWithRetry({
-        control: child,
-        documentText,
-        customInstructions,
-        evidenceId,
-        projectId: evidence.project_id,
-        buildRequirementText,
-        logPrefix: `Group ${jobId}`,
-        imageContent,
-      });
-
-      results.push(result);
-
-      if (result.usage) {
-        totalUsage.prompt_tokens += result.usage.prompt_tokens || 0;
-        totalUsage.completion_tokens += result.usage.completion_tokens || 0;
-        totalUsage.total_tokens += result.usage.total_tokens || 0;
-      }
-
-      if (result.status !== 'error') {
-        console.log(`✅ [Group ${jobId}] ${child.control_number}: ${result.status} (${result.compliance_percentage}%)`);
-      } else {
-        console.error(`❌ [Group ${jobId}] ${child.control_number}: ${result.error}`);
-      }
-    }
-
-    // 7. Compute aggregate statistics
-    const aggregate = computeGroupAggregate(results);
-    const durationSeconds = Math.round((Date.now() - startTime) / 1000);
-
-    console.log(`\n🏁 [Group ${jobId}] Complete: ${results.length} controls analyzed in ${durationSeconds}s`);
-    console.log(`📊 [Group ${jobId}] Aggregate: ${aggregate.overall_status} (${aggregate.average_compliance_percentage}% avg)`);
-
-    // 8. Update job as completed
-    jobs.set(jobId, {
-      status: 'completed',
-      completedAt: Date.now(),
-      result: {
-        aggregate,
-        results,
+    // 4-9. Shared analysis loop
+    await executeGroupAnalysisLoop({
+      jobId,
+      evidence,
+      childControls,
+      jobs,
+      logPrefix: `Group ${jobId}`,
+      customInstructions,
+      resultExtras: {
         parentControl: {
           id: parentControl.id,
           control_number: parentControl.control_number,
           title: parentControl.title,
-        },
-        evidence: {
-          id: evidenceId,
-          name: evidence.file_name,
-        },
-        metadata: {
-          total_tokens_used: totalUsage,
-          duration_seconds: durationSeconds,
-          analyzed_at: new Date().toISOString(),
         },
       },
     });
@@ -289,9 +324,6 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
       completedAt: Date.now(),
       error: err.message,
     });
-  } finally {
-    // 9. Clean up temp file
-    cleanupFile(tempFilePath);
   }
 }
 
@@ -306,12 +338,7 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
  * @param {Map} jobs - In-memory job store
  */
 async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
-  let tempFilePath = null;
-  const startTime = Date.now();
-
   try {
-    const job = jobs.get(jobId);
-
     // 1. Fetch evidence record (no control join needed)
     const { data: evidence, error: evidenceError } = await supabase
       .from('evidence')
@@ -323,7 +350,6 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
       throw new Error(`Evidence not found: ${evidenceError?.message || 'no data'}`);
     }
 
-    // Fetch project-level custom instructions (once, before the loop)
     const customInstructions = await fetchCustomInstructions(evidence.project_id);
 
     // 2. Fetch the specified controls with their frameworks
@@ -341,108 +367,17 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
       throw new Error('No controls found for the provided IDs');
     }
 
-    console.log(`📊 [GroupByIds ${jobId}] ${controls.length} controls to analyze`);
-
-    // Update job with control count
-    if (job) {
-      job.controlsTotal = controls.length;
-      job.controlsCompleted = 0;
-    }
-
-    // 3. Download evidence file — ONCE
-    const filePath = evidence.file_path || evidence.storage_path;
-    if (!filePath) {
-      throw new Error('Evidence record has no file path');
-    }
-
-    if (job) job.progress = 'Downloading evidence file...';
-    tempFilePath = await downloadFile(filePath);
-
-    // 4. Parse document — ONCE (or read image as base64)
-    if (job) job.progress = 'Parsing document...';
-    const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
-
-    let documentText = null;
-    let imageContent = null;
-
-    if (isImageType(mimeType)) {
-      const imageBase64 = fs.readFileSync(tempFilePath).toString('base64');
-      imageContent = { base64: imageBase64, mimeType };
-      console.log(`🖼️ [GroupByIds ${jobId}] Image evidence (${Math.round(imageBase64.length / 1024)}KB base64)`);
-    } else {
-      documentText = await parseDocument(tempFilePath, mimeType);
-      console.log(`📄 [GroupByIds ${jobId}] Document parsed: ${documentText.length} chars`);
-    }
-
-    // 5. Analyze each control sequentially using shared helper
-    const results = [];
-    const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-
-    for (let i = 0; i < controls.length; i++) {
-      const ctrl = controls[i];
-      const controlName = ctrl.title || `Control ${ctrl.control_number}`;
-
-      const progressMsg = `Analyzing control ${i + 1} of ${controls.length} (${ctrl.control_number} - ${controlName})`;
-      console.log(`🔍 [GroupByIds ${jobId}] ${progressMsg}`);
-
-      if (job) {
-        job.progress = progressMsg;
-        job.controlsCompleted = i;
-      }
-
-      const result = await analyzeControlWithRetry({
-        control: ctrl,
-        documentText,
-        customInstructions,
-        evidenceId,
-        projectId: evidence.project_id,
-        buildRequirementText,
-        logPrefix: `GroupByIds ${jobId}`,
-        imageContent,
-      });
-
-      results.push(result);
-
-      if (result.usage) {
-        totalUsage.prompt_tokens += result.usage.prompt_tokens || 0;
-        totalUsage.completion_tokens += result.usage.completion_tokens || 0;
-        totalUsage.total_tokens += result.usage.total_tokens || 0;
-      }
-
-      if (result.status !== 'error') {
-        console.log(`✅ [GroupByIds ${jobId}] ${ctrl.control_number}: ${result.status} (${result.compliance_percentage}%)`);
-      } else {
-        console.error(`❌ [GroupByIds ${jobId}] ${ctrl.control_number}: ${result.error}`);
-      }
-    }
-
-    // 6. Compute aggregate statistics
-    const aggregate = computeGroupAggregate(results);
-    const durationSeconds = Math.round((Date.now() - startTime) / 1000);
-
-    console.log(`\n🏁 [GroupByIds ${jobId}] Complete: ${results.length} controls analyzed in ${durationSeconds}s`);
-    console.log(`📊 [GroupByIds ${jobId}] Aggregate: ${aggregate.overall_status} (${aggregate.average_compliance_percentage}% avg)`);
-
-    // 7. Update job as completed
-    // Include parentControl: null so the frontend transform handles category-based analysis
-    // without crashing on missing parentControl.id
-    jobs.set(jobId, {
-      status: 'completed',
-      completedAt: Date.now(),
-      result: {
-        aggregate,
-        results,
+    // 3-9. Shared analysis loop
+    await executeGroupAnalysisLoop({
+      jobId,
+      evidence,
+      childControls: controls,
+      jobs,
+      logPrefix: `GroupByIds ${jobId}`,
+      customInstructions,
+      resultExtras: {
         parentControl: null,
         controlIds,
-        evidence: {
-          id: evidenceId,
-          name: evidence.file_name,
-        },
-        metadata: {
-          total_tokens_used: totalUsage,
-          duration_seconds: durationSeconds,
-          analyzed_at: new Date().toISOString(),
-        },
       },
     });
   } catch (err) {
@@ -452,8 +387,6 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
       completedAt: Date.now(),
       error: err.message,
     });
-  } finally {
-    cleanupFile(tempFilePath);
   }
 }
 
