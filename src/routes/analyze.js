@@ -6,7 +6,7 @@ const { parseDocument, parseDocumentForViewer } = require('../services/documentP
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
 const { analyzeEvidence, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
-const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
+const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore } = require('../utils/analysisHelpers');
 
 // ── In-memory job store for async group analysis ──
@@ -571,23 +571,15 @@ router.post('/group/:evidenceId', async (req, res) => {
       return res.status(400).json({ error: 'Evidence has no linked control. Attach evidence to a parent control first.' });
     }
 
-    // 2. Verify the parent has child controls
-    const { data: childControls, error: childError } = await supabase
-      .from('controls')
-      .select('id, control_number, title')
-      .eq('framework_id', parentControl.framework_id)
-      .eq('parent_control_number', parentControl.control_number)
-      .order('sort_order', { ascending: true });
-
-    if (childError) {
-      return res.status(500).json({ error: 'Failed to fetch child controls', details: childError.message });
-    }
+    // 2. Verify the parent has child controls (cascading strategies)
+    const { childControls, matchStrategy } = await findChildControls(parentControl, 'id, control_number, title');
 
     if (!childControls || childControls.length === 0) {
       return res.status(400).json({
-        error: `No child controls found under ${parentControl.control_number} (${parentControl.title}). This control may not be a parent, or child controls may not have parent_control_number set.`,
+        error: `No child controls found under ${parentControl.control_number} (${parentControl.title}). Tried parent_control_number, group/category, and prefix matching.`,
       });
     }
+    console.log(`🔗 [Group] Matched ${childControls.length} children via: ${matchStrategy}`);
 
     // 3. Create job and start async processing
     const jobId = crypto.randomUUID();
@@ -691,17 +683,13 @@ router.get('/group/results/:parentControlId', async (req, res) => {
       return res.status(404).json({ error: 'Parent control not found', details: parentError?.message });
     }
 
-    // 2. Find all child control IDs
-    const { data: childControls, error: childError } = await supabase
-      .from('controls')
-      .select('id, control_number, title')
-      .eq('framework_id', parentControl.framework_id)
-      .eq('parent_control_number', parentControl.control_number)
-      .order('sort_order', { ascending: true });
+    // 2. Find all child control IDs (cascading strategies)
+    const { childControls, matchStrategy } = await findChildControls(parentControl, 'id, control_number, title');
 
-    if (childError || !childControls || childControls.length === 0) {
+    if (!childControls || childControls.length === 0) {
       return res.status(404).json({ error: 'No child controls found under this parent' });
     }
+    console.log(`🔗 [GroupResults] Matched ${childControls.length} children via: ${matchStrategy}`);
 
     const childIds = childControls.map((c) => c.id);
 
@@ -899,26 +887,17 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       return res.status(404).json({ error: 'Parent control not found', details: parentError?.message });
     }
 
-    // 2. Fetch all child controls under this parent
-    const { data: childControls, error: childError } = await supabase
-      .from('controls')
-      .select('*, frameworks:framework_id (*)')
-      .eq('framework_id', parentControl.framework_id)
-      .eq('parent_control_number', parentControl.control_number)
-      .order('sort_order', { ascending: true });
-
-    if (childError) {
-      return res.status(500).json({ error: 'Failed to fetch child controls', details: childError.message });
-    }
+    // 2. Fetch all child controls under this parent (cascading strategies)
+    const { childControls, matchStrategy } = await findChildControls(parentControl);
 
     if (!childControls || childControls.length === 0) {
       return res.status(400).json({
-        error: `No child controls found under ${parentControl.control_number} (${parentControl.title}).`,
+        error: `No child controls found under ${parentControl.control_number} (${parentControl.title}). Tried parent_control_number, group/category, and prefix matching.`,
       });
     }
 
     console.log(`📐 Parent: ${parentControl.control_number} - ${parentControl.title}`);
-    console.log(`📊 ${childControls.length} child controls to evaluate`);
+    console.log(`🔗 Matched ${childControls.length} children via: ${matchStrategy}`);
 
     // 3. Fetch all evidence attached to the PARENT control
     const { data: evidenceFiles, error: evidenceError } = await supabase

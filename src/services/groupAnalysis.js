@@ -164,23 +164,16 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
 
     console.log(`📋 [Group ${jobId}] Parent: ${parentControl.control_number} - ${parentControl.title}`);
 
-    // 3. Find all child controls under this parent
-    const { data: childControls, error: childError } = await supabase
-      .from('controls')
-      .select('*, frameworks:framework_id (*)')
-      .eq('framework_id', parentControl.framework_id)
-      .eq('parent_control_number', parentControl.control_number)
-      .order('sort_order', { ascending: true });
-
-    if (childError) {
-      throw new Error(`Failed to fetch child controls: ${childError.message}`);
-    }
+    // 3. Find all child controls under this parent (cascading strategies)
+    const { childControls, matchStrategy } = await findChildControls(parentControl);
 
     if (!childControls || childControls.length === 0) {
       throw new Error(
-        `No child controls found under ${parentControl.control_number}. Ensure controls have parent_control_number set.`
+        `No child controls found under ${parentControl.control_number}. Tried parent_control_number, group/category, and prefix matching.`
       );
     }
+
+    console.log(`📊 [Group ${jobId}] Matched via: ${matchStrategy}`);
 
     console.log(`📊 [Group ${jobId}] Found ${childControls.length} child controls`);
 
@@ -442,10 +435,87 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
   }
 }
 
+/**
+ * Find child controls under a parent using cascading strategies:
+ *  1. parent_control_number match (tree hierarchy)
+ *  2. group/category match (grouped layout)
+ *  3. control_number prefix match (e.g. parent "3" → children "3.1", "3.2")
+ *
+ * @param {Object} parentControl - The parent control record (must have id, framework_id, control_number, title, group)
+ * @param {string} [selectFields='*, frameworks:framework_id (*)'] - Supabase select fields
+ * @returns {Object} { childControls: Array, matchStrategy: string }
+ */
+async function findChildControls(parentControl, selectFields = '*, frameworks:framework_id (*)') {
+  const frameworkId = parentControl.framework_id;
+  const controlNumber = parentControl.control_number || '';
+  const parentId = parentControl.id;
+
+  // --- Strategy A: parent_control_number match (tree hierarchy) ---
+  const { data: treeChildren, error: treeError } = await supabase
+    .from('controls')
+    .select(selectFields)
+    .eq('framework_id', frameworkId)
+    .eq('parent_control_number', controlNumber)
+    .order('sort_order', { ascending: true });
+
+  if (!treeError && treeChildren && treeChildren.length > 0) {
+    console.log(`🔗 Found ${treeChildren.length} children via parent_control_number = "${controlNumber}"`);
+    return { childControls: treeChildren, matchStrategy: 'parent_control_number' };
+  }
+
+  // --- Strategy B: group/category match ---
+  // Controls that share the same group value as the parent, or whose group matches
+  // the parent's control_number or title
+  const groupFilters = [
+    parentControl.group ? `group.eq.${parentControl.group}` : null,
+    `group.eq.${controlNumber}`,
+    `group.eq.${parentControl.title}`,
+    parentControl.category ? `category.eq.${parentControl.category}` : null,
+    parentControl.category ? `group.eq.${parentControl.category}` : null,
+  ].filter(Boolean);
+
+  if (groupFilters.length > 0) {
+    const { data: groupChildren, error: groupError } = await supabase
+      .from('controls')
+      .select(selectFields)
+      .eq('framework_id', frameworkId)
+      .or(groupFilters.join(','))
+      .neq('id', parentId)
+      .order('sort_order', { ascending: true });
+
+    if (!groupError && groupChildren && groupChildren.length > 0) {
+      console.log(`🔗 Found ${groupChildren.length} children via group/category match`);
+      return { childControls: groupChildren, matchStrategy: 'group' };
+    }
+  }
+
+  // --- Strategy C: control_number prefix match ---
+  // e.g. parent "3" finds "3.1", "3.1.1", "3.2", etc.
+  // e.g. parent "AC-1" finds "AC-1.1", "AC-1.2", etc.
+  if (controlNumber) {
+    const { data: prefixChildren, error: prefixError } = await supabase
+      .from('controls')
+      .select(selectFields)
+      .eq('framework_id', frameworkId)
+      .like('control_number', `${controlNumber}.%`)
+      .neq('id', parentId)
+      .order('sort_order', { ascending: true });
+
+    if (!prefixError && prefixChildren && prefixChildren.length > 0) {
+      console.log(`🔗 Found ${prefixChildren.length} children via control_number prefix "${controlNumber}.%"`);
+      return { childControls: prefixChildren, matchStrategy: 'prefix' };
+    }
+  }
+
+  // No children found with any strategy
+  return { childControls: [], matchStrategy: 'none' };
+}
+
 module.exports = {
   buildRequirementText,
   computeGroupAggregate,
   fetchCustomInstructions,
+  findChildControls,
   runGroupAnalysis,
   runGroupAnalysisByIds,
 };
