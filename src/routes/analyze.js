@@ -601,7 +601,49 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       fileType = 'docx';
     }
 
-    // 8. Return viewer response
+    // 8. Filter analysis findings for alternate evidence
+    //    When viewing a different evidence document, only show findings from THAT document
+    let responseFindings = analysis.findings;
+    let responseStatus = analysis.status;
+    let responseCompliance = analysis.compliance_percentage;
+    let responseConfidence = analysis.confidence_score;
+    let responseSummary = analysis.summary;
+
+    if (isAlternateEvidence) {
+      const fullBreakdown = analysis.findings?.requirements_breakdown || [];
+      const matchesActiveFile = (item) => {
+        const src = (item.evidence_source || '').toLowerCase();
+        const fileName = (activeEvidence.file_name || '').toLowerCase();
+        return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
+      };
+
+      const filteredRequirements = fullBreakdown.filter(matchesActiveFile);
+      console.log(`📊 [Viewer] Filtered analysis to ${filteredRequirements.length} of ${fullBreakdown.length} findings for ${activeEvidence.file_name}`);
+
+      // Recompute status and stats from filtered findings
+      if (filteredRequirements.length > 0) {
+        const metCount = filteredRequirements.filter(f => f.status === 'met').length;
+        const partialCount = filteredRequirements.filter(f => f.status === 'partial').length;
+        const missingCount = filteredRequirements.filter(f => f.status === 'missing').length;
+
+        responseCompliance = Math.round(((metCount + partialCount * 0.5) / filteredRequirements.length) * 100);
+        responseStatus = missingCount > 0 ? 'non_compliant'
+          : partialCount > 0 ? 'partial'
+          : 'compliant';
+
+        const confidenceValues = filteredRequirements.map(f => parseFloat(f.confidence || 0.5));
+        responseConfidence = parseFloat((confidenceValues.reduce((a, b) => a + b, 0) / confidenceValues.length).toFixed(2));
+
+        responseSummary = `Findings from ${activeEvidence.file_name}: ${metCount} met, ${partialCount} partial, ${missingCount} missing out of ${filteredRequirements.length} requirements.`;
+      }
+
+      responseFindings = {
+        ...analysis.findings,
+        requirements_breakdown: filteredRequirements,
+      };
+    }
+
+    // 9. Return viewer response
     res.json({
       success: true,
       viewer: {
@@ -615,11 +657,11 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       },
       analysis: {
         id: analysis.id,
-        status: analysis.status,
-        compliance_percentage: analysis.compliance_percentage,
-        confidence_score: analysis.confidence_score,
-        summary: analysis.summary,
-        findings: analysis.findings,
+        status: responseStatus,
+        compliance_percentage: responseCompliance,
+        confidence_score: responseConfidence,
+        summary: responseSummary,
+        findings: responseFindings,
         diff_data: {
           requirement_coverage: analysis.diff_data?.requirement_coverage,
           statistics: analysis.diff_data?.statistics,
