@@ -1691,7 +1691,7 @@ router.post('/multi-evidence/:controlId', async (req, res) => {
       });
     }
 
-    console.log(`✅ Multi-evidence analysis saved: ${savedAnalysis.id} (${validDocs.length} docs consolidated)`);
+    console.log(`✅ Multi-evidence analysis saved: ${savedAnalysis.id} (${totalDocs} docs consolidated)`);
 
     // 10. Return consolidated result
     res.json({
