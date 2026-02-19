@@ -445,15 +445,18 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       return res.status(400).json({ error: 'Evidence record not found for this analysis' });
     }
 
-    // 2. Check for alternate evidence document via ?evidenceId= query param
+    // 2. Resolve active evidence document
     const requestedEvidenceId = req.query.evidenceId;
     const sources = analysis.diff_data?.evidence_sources || [];
     let activeEvidence = defaultEvidence;
     let isAlternateEvidence = false;
+    // Multi-evidence analyses ALWAYS filter per-evidence — no combined view
+    const shouldFilterByEvidence = sources.length > 1;
 
-    if (requestedEvidenceId && requestedEvidenceId !== defaultEvidence.id) {
+    if (requestedEvidenceId) {
       const isValidSource = sources.some(s => s.id === requestedEvidenceId);
-      if (isValidSource) {
+      if (isValidSource && requestedEvidenceId !== defaultEvidence.id) {
+        // Different file from default — fetch its record
         const { data: altEvidence, error: altError } = await supabase
           .from('evidence')
           .select('id, file_name, file_type, file_path')
@@ -465,9 +468,11 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
           isAlternateEvidence = true;
           console.log(`🔄 [Viewer] Switching to alternate evidence: ${altEvidence.file_name}`);
         }
-      } else {
+      } else if (!isValidSource && sources.length > 0) {
         console.warn(`⚠️ [Viewer] Requested evidenceId ${requestedEvidenceId} not in evidence_sources — using default`);
       }
+      // If requestedEvidenceId === defaultEvidence.id, activeEvidence stays as default
+      // but shouldFilterByEvidence is still true for multi-evidence (no combined view)
     }
 
     const filePath = activeEvidence.file_path;
@@ -477,7 +482,77 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
 
     const mimeType = activeEvidence.file_type || 'text/plain';
 
-    // 3. IMAGE VIEWER: return signed URL + extracted text, no highlights
+    // 3. Per-evidence filtering — runs BEFORE file-type branching so images get filtered too
+    //    For multi-evidence analyses, each tab shows only its own findings (no combined view)
+    let responseFindings = analysis.findings;
+    let responseStatus = analysis.status;
+    let responseCompliance = analysis.compliance_percentage;
+    let responseConfidence = analysis.confidence_score;
+    let responseSummary = analysis.summary;
+    let responseDiffData = {
+      requirement_coverage: analysis.diff_data?.requirement_coverage,
+      statistics: analysis.diff_data?.statistics,
+      side_by_side: analysis.diff_data?.side_by_side,
+      recommendations: analysis.diff_data?.recommendations || [],
+      critical_gaps: analysis.diff_data?.critical_gaps || [],
+    };
+
+    if (shouldFilterByEvidence) {
+      const fullBreakdown = analysis.findings?.requirements_breakdown || [];
+      const perEvidence = analysis.findings?.per_evidence_breakdown;
+      let filteredRequirements;
+
+      // Direct lookup by evidence_id (new analyses) or fuzzy fallback (old analyses)
+      if (perEvidence && perEvidence[activeEvidence.id] && perEvidence[activeEvidence.id].length > 0) {
+        filteredRequirements = perEvidence[activeEvidence.id];
+        console.log(`📊 [Viewer] Direct lookup: ${filteredRequirements.length} findings for evidence ${activeEvidence.id} (${activeEvidence.file_name})`);
+      } else {
+        // Fuzzy match by filename for old analyses without per_evidence_breakdown
+        filteredRequirements = fullBreakdown.filter(item => {
+          const src = (item.evidence_source || '').toLowerCase();
+          const fileName = (activeEvidence.file_name || '').toLowerCase();
+          return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
+        });
+        console.log(`📊 [Viewer] Fuzzy fallback: ${filteredRequirements.length} of ${fullBreakdown.length} findings for ${activeEvidence.file_name}`);
+      }
+
+      // Recompute status and stats from filtered findings
+      if (filteredRequirements.length > 0) {
+        const metCount = filteredRequirements.filter(f => f.status === 'met').length;
+        const partialCount = filteredRequirements.filter(f => f.status === 'partial').length;
+        const missingCount = filteredRequirements.filter(f => f.status === 'missing').length;
+
+        responseCompliance = Math.round(((metCount + partialCount * 0.5) / filteredRequirements.length) * 100);
+        responseStatus = missingCount > 0 ? 'non_compliant'
+          : partialCount > 0 ? 'partial'
+          : 'compliant';
+
+        const confidenceValues = filteredRequirements.map(f => parseFloat(f.confidence || 0.5));
+        responseConfidence = parseFloat((confidenceValues.reduce((a, b) => a + b, 0) / confidenceValues.length).toFixed(2));
+
+        responseSummary = `Findings from ${activeEvidence.file_name}: ${metCount} met, ${partialCount} partial, ${missingCount} missing out of ${filteredRequirements.length} requirements.`;
+      }
+
+      responseFindings = { ...analysis.findings, requirements_breakdown: filteredRequirements };
+
+      // Rebuild diff_data from filtered findings
+      if (filteredRequirements.length > 0) {
+        const rebuiltDiff = generateDiff(
+          { status: responseStatus, compliance_percentage: responseCompliance, confidence_score: responseConfidence, requirements_breakdown: filteredRequirements },
+          analysis.diff_data?.original_requirement || ''
+        );
+        responseDiffData = {
+          requirement_coverage: rebuiltDiff.requirement_coverage,
+          statistics: rebuiltDiff.statistics,
+          side_by_side: rebuiltDiff.side_by_side,
+          recommendations: analysis.diff_data?.recommendations || [],
+          critical_gaps: analysis.diff_data?.critical_gaps || [],
+        };
+        console.log(`🔄 [Viewer] Rebuilt diff_data for ${activeEvidence.file_name}: ${rebuiltDiff.statistics.total_requirements} requirements, ${rebuiltDiff.statistics.met_count} met`);
+      }
+    }
+
+    // 4. IMAGE VIEWER: return signed URL + extracted text, no highlights
     if (isImageType(mimeType)) {
       const signedUrl = await getSignedUrl(filePath, 300);
       const extractedText = analysis.diff_data?.extracted_text || analysis.findings?.extracted_text || '';
@@ -488,25 +563,19 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
           analysisId,
           fileType: 'image',
           signedUrl,
-          documentText: extractedText, // OCR text for reference
+          documentText: extractedText,
           documentHtml: null,
-          highlightRanges: [], // No text highlighting for images
+          highlightRanges: [],
           currentEvidenceId: activeEvidence.id,
         },
         analysis: {
           id: analysis.id,
-          status: analysis.status,
-          compliance_percentage: analysis.compliance_percentage,
-          confidence_score: analysis.confidence_score,
-          summary: analysis.summary,
-          findings: analysis.findings,
-          diff_data: {
-            requirement_coverage: analysis.diff_data?.requirement_coverage,
-            statistics: analysis.diff_data?.statistics,
-            side_by_side: analysis.diff_data?.side_by_side,
-            recommendations: analysis.diff_data?.recommendations,
-            critical_gaps: analysis.diff_data?.critical_gaps,
-          },
+          status: responseStatus,
+          compliance_percentage: responseCompliance,
+          confidence_score: responseConfidence,
+          summary: responseSummary,
+          findings: responseFindings,
+          diff_data: responseDiffData,
         },
         evidenceSources: sources.length > 0 ? sources : null,
         evidence: {
@@ -522,8 +591,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       });
     }
 
-    // 4. Check for cached viewer data in diff_data (only for default evidence)
-    //    Alternate evidence is always freshly parsed (not cached)
+    // 5. Check for cached viewer data in diff_data (only for default evidence, non-alternate)
     let documentText = null;
     let documentHtml = null;
     let highlightRanges = null;
@@ -536,7 +604,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
 
     const hasValidCache = !isAlternateEvidence && documentText && highlightRanges && highlightRanges.length > 0;
 
-    // 5. If not cached, download and parse the document
+    // 6. If not cached, download and parse the document
     if (!hasValidCache) {
       console.log(`📄 [Viewer] ${isAlternateEvidence ? 'Alternate' : 'First'} view for analysis ${analysisId} — downloading ${activeEvidence.file_name}`);
 
@@ -544,30 +612,14 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       const parsed = await parseDocumentForViewer(tempFilePath, mimeType);
 
       documentText = parsed.text;
-      documentHtml = parsed.html; // null for PDF/text
+      documentHtml = parsed.html;
 
-      // Build highlight ranges — for alternate evidence, filter to findings from this document
-      const breakdown = analysis.findings?.requirements_breakdown || [];
-      let filteredBreakdown = breakdown;
+      // Build highlight ranges — use filtered findings for multi-evidence
+      const highlightFindings = shouldFilterByEvidence
+        ? (responseFindings?.requirements_breakdown || [])
+        : (analysis.findings?.requirements_breakdown || []);
 
-      if (isAlternateEvidence) {
-        const perEvidence = analysis.findings?.per_evidence_breakdown;
-        if (perEvidence && perEvidence[activeEvidence.id] && perEvidence[activeEvidence.id].length > 0) {
-          // Direct lookup by evidence_id
-          filteredBreakdown = perEvidence[activeEvidence.id];
-          console.log(`🔍 [Viewer] Highlight direct lookup: ${filteredBreakdown.length} findings for evidence ${activeEvidence.id}`);
-        } else {
-          // Fuzzy fallback for old analyses
-          filteredBreakdown = breakdown.filter(item => {
-            const src = (item.evidence_source || '').toLowerCase();
-            const fileName = (activeEvidence.file_name || '').toLowerCase();
-            return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
-          });
-          console.log(`🔍 [Viewer] Highlight fuzzy fallback: ${filteredBreakdown.length} of ${breakdown.length} findings for ${activeEvidence.file_name}`);
-        }
-      }
-
-      highlightRanges = verifyAndBuildHighlightRanges(documentText, filteredBreakdown);
+      highlightRanges = verifyAndBuildHighlightRanges(documentText, highlightFindings);
 
       console.log(`🎯 [Viewer] ${highlightRanges.length} highlight ranges matched (${highlightRanges.filter(r => r.matchQuality === 'exact').length} exact)`);
 
@@ -594,13 +646,13 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       }
     }
 
-    // 6. Generate signed URL for PDF viewing
+    // 7. Generate signed URL for PDF viewing
     let signedUrl = null;
     if (mimeType === 'application/pdf') {
       signedUrl = await getSignedUrl(filePath, 300);
     }
 
-    // 7. Determine file type for frontend
+    // 8. Determine file type for frontend
     let fileType = 'text';
     if (mimeType === 'application/pdf') {
       fileType = 'pdf';
@@ -608,85 +660,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       fileType = 'docx';
     }
 
-    // 8. Filter analysis findings for alternate evidence
-    //    When viewing a different evidence document, only show findings from THAT document
-    let responseFindings = analysis.findings;
-    let responseStatus = analysis.status;
-    let responseCompliance = analysis.compliance_percentage;
-    let responseConfidence = analysis.confidence_score;
-    let responseSummary = analysis.summary;
-
-    if (isAlternateEvidence) {
-      const fullBreakdown = analysis.findings?.requirements_breakdown || [];
-      const perEvidence = analysis.findings?.per_evidence_breakdown;
-      let filteredRequirements;
-
-      if (perEvidence && perEvidence[activeEvidence.id] && perEvidence[activeEvidence.id].length > 0) {
-        // ── NEW: Direct lookup by evidence_id — reliable, no filename matching needed ──
-        filteredRequirements = perEvidence[activeEvidence.id];
-        console.log(`📊 [Viewer] Direct lookup: ${filteredRequirements.length} findings for evidence ${activeEvidence.id} (${activeEvidence.file_name})`);
-      } else {
-        // ── FALLBACK: Legacy fuzzy matching for old analyses without per_evidence_breakdown ──
-        const matchesActiveFile = (item) => {
-          const src = (item.evidence_source || '').toLowerCase();
-          const fileName = (activeEvidence.file_name || '').toLowerCase();
-          return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
-        };
-        filteredRequirements = fullBreakdown.filter(matchesActiveFile);
-        console.log(`📊 [Viewer] Fuzzy fallback: ${filteredRequirements.length} of ${fullBreakdown.length} findings for ${activeEvidence.file_name}`);
-      }
-
-      // Recompute status and stats from filtered findings
-      if (filteredRequirements.length > 0) {
-        const metCount = filteredRequirements.filter(f => f.status === 'met').length;
-        const partialCount = filteredRequirements.filter(f => f.status === 'partial').length;
-        const missingCount = filteredRequirements.filter(f => f.status === 'missing').length;
-
-        responseCompliance = Math.round(((metCount + partialCount * 0.5) / filteredRequirements.length) * 100);
-        responseStatus = missingCount > 0 ? 'non_compliant'
-          : partialCount > 0 ? 'partial'
-          : 'compliant';
-
-        const confidenceValues = filteredRequirements.map(f => parseFloat(f.confidence || 0.5));
-        responseConfidence = parseFloat((confidenceValues.reduce((a, b) => a + b, 0) / confidenceValues.length).toFixed(2));
-
-        responseSummary = `Findings from ${activeEvidence.file_name}: ${metCount} met, ${partialCount} partial, ${missingCount} missing out of ${filteredRequirements.length} requirements.`;
-      }
-
-      responseFindings = {
-        ...analysis.findings,
-        requirements_breakdown: filteredRequirements,
-      };
-    }
-
-    // 9. Build response diff_data — rebuild from filtered findings for alternate evidence
-    let responseDiffData = {
-      requirement_coverage: analysis.diff_data?.requirement_coverage,
-      statistics: analysis.diff_data?.statistics,
-      side_by_side: analysis.diff_data?.side_by_side,
-      recommendations: analysis.diff_data?.recommendations || [],
-      critical_gaps: analysis.diff_data?.critical_gaps || [],
-    };
-
-    if (isAlternateEvidence && responseFindings?.requirements_breakdown?.length > 0) {
-      const filteredAnalysis = {
-        status: responseStatus,
-        compliance_percentage: responseCompliance,
-        confidence_score: responseConfidence,
-        requirements_breakdown: responseFindings.requirements_breakdown,
-      };
-      const rebuiltDiff = generateDiff(filteredAnalysis, analysis.diff_data?.original_requirement || '');
-      responseDiffData = {
-        requirement_coverage: rebuiltDiff.requirement_coverage,
-        statistics: rebuiltDiff.statistics,
-        side_by_side: rebuiltDiff.side_by_side,
-        recommendations: analysis.diff_data?.recommendations || [],
-        critical_gaps: analysis.diff_data?.critical_gaps || [],
-      };
-      console.log(`🔄 [Viewer] Rebuilt diff_data for ${activeEvidence.file_name}: ${rebuiltDiff.statistics.total_requirements} requirements, ${rebuiltDiff.statistics.met_count} met`);
-    }
-
-    // 10. Return viewer response
+    // 9. Return viewer response — analysis is already filtered per-evidence above
     res.json({
       success: true,
       viewer: {
