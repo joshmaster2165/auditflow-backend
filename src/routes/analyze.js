@@ -513,11 +513,20 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
         // Fuzzy match by filename for old analyses without per_evidence_breakdown
         filteredRequirements = fullBreakdown.filter(item => {
           const src = (item.evidence_source || '').toLowerCase();
+          if (!src) return false; // Skip findings with no evidence_source — empty string matches everything
           const fileName = (activeEvidence.file_name || '').toLowerCase();
           return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
         });
         console.log(`📊 [Viewer] Fuzzy fallback: ${filteredRequirements.length} of ${fullBreakdown.length} findings for ${activeEvidence.file_name}`);
       }
+
+      // If no per_evidence_breakdown AND fuzzy returned nothing, fall back to all findings
+      if (filteredRequirements.length === 0 && (!perEvidence || Object.keys(perEvidence).length === 0)) {
+        console.warn(`⚠️ [Viewer] No per_evidence_breakdown and fuzzy match returned 0 — falling back to all findings`);
+        filteredRequirements = fullBreakdown;
+      }
+
+      console.log(`📊 [Viewer] Evidence ${activeEvidence.id} (${activeEvidence.file_name}) → ${filteredRequirements.length} filtered findings`);
 
       // Recompute status and stats from filtered findings
       if (filteredRequirements.length > 0) {
