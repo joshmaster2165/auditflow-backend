@@ -1,5 +1,6 @@
+const fs = require('fs');
 const { supabase, downloadFile, cleanupFile } = require('../utils/supabase');
-const { parseDocument } = require('./documentParser');
+const { parseDocument, isImageType } = require('./documentParser');
 const { analyzeControlWithRetry } = require('../utils/analysisHelpers');
 
 /**
@@ -192,12 +193,22 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
     if (job) job.progress = 'Downloading evidence file...';
     tempFilePath = await downloadFile(filePath);
 
-    // 5. Parse document — ONCE
+    // 5. Parse document — ONCE (or read image as base64)
     if (job) job.progress = 'Parsing document...';
     const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
-    const documentText = await parseDocument(tempFilePath, mimeType);
 
-    console.log(`📄 [Group ${jobId}] Document parsed: ${documentText.length} chars`);
+    let documentText = null;
+    let imageContent = null;
+
+    if (isImageType(mimeType)) {
+      // Image evidence — read as base64 once, pass to each control analysis
+      const imageBase64 = fs.readFileSync(tempFilePath).toString('base64');
+      imageContent = { base64: imageBase64, mimeType };
+      console.log(`🖼️ [Group ${jobId}] Image evidence (${Math.round(imageBase64.length / 1024)}KB base64)`);
+    } else {
+      documentText = await parseDocument(tempFilePath, mimeType);
+      console.log(`📄 [Group ${jobId}] Document parsed: ${documentText.length} chars`);
+    }
 
     // 6. Analyze each child control sequentially using shared helper
     const results = [];
@@ -223,6 +234,7 @@ async function runGroupAnalysis(jobId, evidenceId, jobs) {
         projectId: evidence.project_id,
         buildRequirementText,
         logPrefix: `Group ${jobId}`,
+        imageContent,
       });
 
       results.push(result);
@@ -346,12 +358,21 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
     if (job) job.progress = 'Downloading evidence file...';
     tempFilePath = await downloadFile(filePath);
 
-    // 4. Parse document — ONCE
+    // 4. Parse document — ONCE (or read image as base64)
     if (job) job.progress = 'Parsing document...';
     const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
-    const documentText = await parseDocument(tempFilePath, mimeType);
 
-    console.log(`📄 [GroupByIds ${jobId}] Document parsed: ${documentText.length} chars`);
+    let documentText = null;
+    let imageContent = null;
+
+    if (isImageType(mimeType)) {
+      const imageBase64 = fs.readFileSync(tempFilePath).toString('base64');
+      imageContent = { base64: imageBase64, mimeType };
+      console.log(`🖼️ [GroupByIds ${jobId}] Image evidence (${Math.round(imageBase64.length / 1024)}KB base64)`);
+    } else {
+      documentText = await parseDocument(tempFilePath, mimeType);
+      console.log(`📄 [GroupByIds ${jobId}] Document parsed: ${documentText.length} chars`);
+    }
 
     // 5. Analyze each control sequentially using shared helper
     const results = [];
@@ -377,6 +398,7 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
         projectId: evidence.project_id,
         buildRequirementText,
         logPrefix: `GroupByIds ${jobId}`,
+        imageContent,
       });
 
       results.push(result);

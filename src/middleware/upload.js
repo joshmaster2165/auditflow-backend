@@ -23,8 +23,12 @@ const fileFilter = (req, file, cb) => {
     'text/plain', // some systems send CSV as text/plain
     'application/vnd.ms-excel',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'image/png',
+    'image/jpeg',
+    'image/webp',
+    'image/gif',
   ];
-  const allowedExts = ['.pdf', '.csv', '.xls', '.xlsx'];
+  const allowedExts = ['.pdf', '.csv', '.xls', '.xlsx', '.png', '.jpg', '.jpeg', '.webp', '.gif'];
 
   const ext = path.extname(file.originalname).toLowerCase();
   const mimeOk = allowedMimes.includes(file.mimetype);
@@ -35,7 +39,7 @@ const fileFilter = (req, file, cb) => {
   } else {
     cb(
       new Error(
-        `Unsupported file type: ${file.mimetype} (${ext}). Accepted: PDF, CSV, XLSX`
+        `Unsupported file type: ${file.mimetype} (${ext}). Accepted: PDF, CSV, XLSX, PNG, JPG, WEBP, GIF`
       )
     );
   }

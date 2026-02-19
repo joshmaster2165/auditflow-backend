@@ -1,5 +1,5 @@
 const { supabase } = require('./supabase');
-const { analyzeEvidence } = require('../services/gpt');
+const { analyzeEvidence, analyzeImageEvidence } = require('../services/gpt');
 const { generateDiff } = require('../services/diffGenerator');
 
 /**
@@ -35,25 +35,41 @@ function buildAnalysisRecord({ evidenceId, controlId, projectId, gptResult, diff
  *
  * @param {Object} opts
  * @param {Object} opts.control - Control record (with .id, .control_number, .title, .frameworks)
- * @param {string} opts.documentText - Parsed evidence document text
+ * @param {string} opts.documentText - Parsed evidence document text (null for images)
  * @param {string|null} opts.customInstructions - Project-level custom instructions
  * @param {string} opts.evidenceId - Evidence UUID
  * @param {string|null} opts.projectId - Project UUID
  * @param {Function} opts.buildRequirementText - Requirement text builder function
  * @param {string} opts.logPrefix - Prefix for console logs (e.g. "Group abc123")
+ * @param {Object|null} opts.imageContent - Optional image data { base64, mimeType } for vision analysis
  * @returns {Object} Result summary for the control
  */
 async function analyzeControlWithRetry({
   control, documentText, customInstructions, evidenceId, projectId,
-  buildRequirementText, logPrefix,
+  buildRequirementText, logPrefix, imageContent,
 }) {
   const controlName = control.title || `Control ${control.control_number}`;
   const ctrlFramework = control.frameworks || null;
   const requirementText = buildRequirementText(control, ctrlFramework);
 
+  // Helper: call the right GPT function based on text vs image
+  const runAnalysis = () => {
+    if (imageContent) {
+      return analyzeImageEvidence(imageContent.base64, imageContent.mimeType, requirementText, controlName, customInstructions);
+    }
+    return analyzeEvidence(documentText, requirementText, controlName, customInstructions);
+  };
+
   try {
-    const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
+    const gptResult = await runAnalysis();
     const diffData = generateDiff(gptResult.analysis, requirementText);
+
+    // Store extracted text for image evidence
+    if (imageContent) {
+      diffData.extracted_text = gptResult.analysis.extracted_text || '';
+      diffData.is_image = true;
+    }
+
     const record = buildAnalysisRecord({ evidenceId, controlId: control.id, projectId, gptResult, diffData });
 
     const { data: saved, error: saveError } = await supabase
@@ -85,8 +101,14 @@ async function analyzeControlWithRetry({
       await new Promise(r => setTimeout(r, 60000));
 
       try {
-        const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
+        const gptResult = await runAnalysis();
         const diffData = generateDiff(gptResult.analysis, requirementText);
+
+        if (imageContent) {
+          diffData.extracted_text = gptResult.analysis.extracted_text || '';
+          diffData.is_image = true;
+        }
+
         const record = buildAnalysisRecord({ evidenceId, controlId: control.id, projectId, gptResult, diffData });
 
         const { data: saved, error: saveError } = await supabase

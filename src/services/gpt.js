@@ -328,6 +328,166 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
 }
 
 // ─────────────────────────────────────────────────────────────
+// Image / Vision Analysis — analyze images using GPT-4o vision
+// ─────────────────────────────────────────────────────────────
+
+const IMAGE_SYSTEM_PROMPT = `You are an expert compliance auditor specializing in analyzing visual evidence — screenshots, photos, scanned documents, and images — against compliance requirements.
+
+Your task is to:
+1. Extract ALL readable text from the image (OCR). Include every piece of text you can see, preserving structure where possible.
+2. Analyze both the visual content and extracted text against the compliance requirement.
+3. For screenshots of system configurations, verify specific settings and values visible in the image.
+4. For photos of physical security controls, assess whether the controls shown meet the requirement.
+5. For scanned documents, extract the text and analyze it like a regular document.
+
+If the user provides custom analysis instructions, you MUST follow them. They take priority over default analysis behavior.
+
+You must respond with valid JSON only. Do not include any text outside the JSON object.`;
+
+function buildImageUserPrompt(requirementText, controlName, customInstructions) {
+  return `Analyze the following image against the compliance requirement.
+
+## Control: ${controlName || 'Unnamed Control'}
+
+## Compliance Requirement:
+${requirementText}
+${customInstructions ? `
+## Custom Analysis Instructions:
+The following project-level guidance MUST be applied to this analysis. These instructions take priority over default analysis behavior:
+${customInstructions}
+` : ''}
+## Output Format:
+Return a JSON object with this structure:
+
+{
+  "extracted_text": "<ALL readable text from the image, preserving structure>",
+  "status": "compliant" | "partial" | "non_compliant",
+  "confidence_score": <number 0.0-1.0>,
+  "compliance_percentage": <number 0-100>,
+  "summary": "<concise summary of overall findings>",
+  "requirements_breakdown": [
+    {
+      "requirement_id": "<short ID like REQ-1>",
+      "requirement_text": "<the sub-requirement being tested>",
+      "status": "met" | "partial" | "missing",
+      "evidence_found": "<quote relevant text visible in the image, or describe the visual evidence seen>",
+      "evidence_location": {
+        "start_index": -1,
+        "end_index": -1,
+        "section_context": "<describe where in the image this evidence is located>"
+      },
+      "gap_description": "<what is missing or null if fully met>",
+      "confidence": <number 0.0-1.0>
+    }
+  ],
+  "recommendations": ["<actionable recommendation>", ...],
+  "critical_gaps": ["<critical finding>", ...]
+}
+
+CRITICAL: Include the "extracted_text" field with ALL text you can read from the image.
+For evidence_found: quote text visible in the image, or describe visual evidence (e.g., "Screenshot shows firewall rule blocking port 22").
+For evidence_location: always use start_index: -1 and end_index: -1 since this is an image. Use section_context to describe the location within the image.`;
+}
+
+/**
+ * Analyze an image against a compliance requirement using GPT-4o vision.
+ * Performs both OCR (text extraction) and compliance analysis in one call.
+ *
+ * @param {string} imageBase64 - Base64-encoded image data
+ * @param {string} mimeType - Image MIME type (e.g., 'image/png')
+ * @param {string} requirementText - The compliance requirement
+ * @param {string} controlName - Control title
+ * @param {string|null} customInstructions - Optional custom instructions
+ * @returns {{ analysis, model, usage, finish_reason }}
+ */
+async function analyzeImageEvidence(imageBase64, mimeType, requirementText, controlName, customInstructions) {
+  if (!imageBase64) {
+    throw new Error('Image data is empty');
+  }
+  if (!requirementText || requirementText.trim().length < 10) {
+    throw new Error('Requirement text is empty or too short for analysis');
+  }
+
+  const dataUrl = `data:${mimeType};base64,${imageBase64}`;
+  console.log(`🖼️ Sending image to GPT-4o vision for analysis (${Math.round(imageBase64.length / 1024)}KB base64)...`);
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: IMAGE_SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: buildImageUserPrompt(requirementText, controlName, customInstructions) },
+            { type: 'image_url', image_url: { url: dataUrl, detail: 'high' } },
+          ],
+        },
+      ],
+      temperature: 0.2,
+      max_tokens: 16384,
+      response_format: { type: 'json_object' },
+    });
+
+    const choice = response.choices[0];
+    if (choice.finish_reason === 'length') {
+      console.warn('⚠️ GPT vision response was truncated due to token limit.');
+    }
+
+    const content = choice.message.content;
+    let analysis;
+
+    try {
+      analysis = JSON.parse(content);
+    } catch (parseErr) {
+      console.error('❌ Failed to parse GPT vision response as JSON:', content.substring(0, 200));
+      throw new Error('GPT returned invalid JSON response for image analysis');
+    }
+
+    // Normalize — same logic as analyzeEvidence()
+    if (!analysis.status) {
+      analysis.status = 'non_compliant';
+    }
+
+    if (!analysis.requirements_breakdown) {
+      analysis.requirements_breakdown = analysis.breakdown || analysis.sub_requirements || analysis.requirements || [];
+    }
+    if (!Array.isArray(analysis.requirements_breakdown)) {
+      analysis.requirements_breakdown = analysis.requirements_breakdown ? [analysis.requirements_breakdown] : [];
+    }
+
+    analysis.requirements_breakdown = analysis.requirements_breakdown.map((item, i) => ({
+      requirement_id: item.requirement_id || item.id || `REQ-${i + 1}`,
+      requirement_text: item.requirement_text || item.text || item.description || 'Sub-requirement',
+      status: item.status || 'missing',
+      evidence_found: item.evidence_found || item.evidence || null,
+      evidence_location: item.evidence_location || { start_index: -1, end_index: -1, section_context: null },
+      evidence_source: item.evidence_source || null,
+      gap_description: item.gap_description || item.gap || null,
+      confidence: parseFloat(item.confidence || item.confidence_score || 0.5),
+    }));
+
+    analysis.confidence_score = parseFloat(analysis.confidence_score || 0);
+    analysis.compliance_percentage = parseInt(analysis.compliance_percentage || 0, 10);
+    analysis.summary = analysis.summary || '';
+    analysis.extracted_text = analysis.extracted_text || '';
+    analysis.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
+    analysis.critical_gaps = Array.isArray(analysis.critical_gaps) ? analysis.critical_gaps : [];
+
+    console.log(`✅ GPT vision analysis complete: ${analysis.status} (${analysis.compliance_percentage}% compliance, OCR: ${analysis.extracted_text.length} chars)`);
+
+    return {
+      analysis,
+      model: response.model,
+      usage: response.usage,
+      finish_reason: choice.finish_reason,
+    };
+  } catch (err) {
+    handleOpenAIError(err);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Framework Extraction — extract controls from PDF documents
 // ─────────────────────────────────────────────────────────────
 
@@ -790,4 +950,4 @@ async function enhanceFrameworkControls(controls, context = {}) {
   }
 }
 
-module.exports = { analyzeEvidence, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls };
+module.exports = { analyzeEvidence, analyzeImageEvidence, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls };

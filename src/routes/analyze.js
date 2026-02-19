@@ -2,9 +2,10 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/supabase');
-const { parseDocument, parseDocumentForViewer } = require('../services/documentParser');
+const fs = require('fs');
+const { parseDocument, parseDocumentForViewer, isImageType } = require('../services/documentParser');
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
-const { analyzeEvidence, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt } = require('../services/gpt');
+const { analyzeEvidence, analyzeImageEvidence, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore } = require('../utils/analysisHelpers');
@@ -50,9 +51,8 @@ router.post('/evidence/:evidenceId', async (req, res) => {
 
     tempFilePath = await downloadFile(filePath);
 
-    // 3. Parse document text
+    // 3. Determine MIME type
     const mimeType = evidence.file_type || evidence.mime_type || 'text/plain';
-    const documentText = await parseDocument(tempFilePath, mimeType);
 
     // 4. Get requirement text — prioritize frontend-provided context, fallback to DB join
     const dbControl = evidence.controls;
@@ -110,20 +110,41 @@ router.post('/evidence/:evidenceId', async (req, res) => {
     // 5. Fetch project-level custom instructions
     const customInstructions = await fetchCustomInstructions(evidence.project_id);
 
-    // 6. Send to GPT for analysis
-    const gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
+    // 6. Branch: Image vs Text analysis
+    let gptResult;
+    let diffData;
 
-    // 7. Generate diff visualization
-    const diffData = generateDiff(gptResult.analysis, requirementText);
+    if (isImageType(mimeType)) {
+      // ── IMAGE ANALYSIS PATH ──
+      console.log(`🖼️ Image evidence detected (${mimeType}) — using GPT-4o vision`);
+      const imageBase64 = fs.readFileSync(tempFilePath).toString('base64');
 
-    // 8. Store results in analysis_results table
+      // Size guard: reject images over 20MB base64
+      if (imageBase64.length > 20 * 1024 * 1024 * 1.37) {
+        return res.status(400).json({ error: 'Image file is too large for analysis (max 20MB)' });
+      }
+
+      gptResult = await analyzeImageEvidence(imageBase64, mimeType, requirementText, controlName, customInstructions);
+
+      // Generate diff + store OCR extracted text
+      diffData = generateDiff(gptResult.analysis, requirementText);
+      diffData.extracted_text = gptResult.analysis.extracted_text || '';
+      diffData.is_image = true;
+    } else {
+      // ── TEXT ANALYSIS PATH (existing) ──
+      const documentText = await parseDocument(tempFilePath, mimeType);
+      gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
+      diffData = generateDiff(gptResult.analysis, requirementText);
+    }
+
+    // 7. Store results in analysis_results table
     const analysisRecord = {
       evidence_id: evidenceId,
       control_id: control.id || null,
       project_id: evidence.project_id || null,
       analyzed_at: new Date().toISOString(),
       analysis_version: 'v1.0',
-      model_used: gptResult.model || 'gpt-4-turbo-preview',
+      model_used: gptResult.model || 'gpt-4o',
       status: gptResult.analysis.status,
       confidence_score: gptResult.analysis.confidence_score,
       compliance_percentage: gptResult.analysis.compliance_percentage,
@@ -159,7 +180,7 @@ router.post('/evidence/:evidenceId', async (req, res) => {
 
     console.log(`✅ Analysis saved: ${savedAnalysis.id}`);
 
-    // 9. Return analysis response
+    // 8. Return analysis response
     res.json({
       success: true,
       analysis_id: savedAnalysis.id,
@@ -456,7 +477,52 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
 
     const mimeType = activeEvidence.file_type || 'text/plain';
 
-    // 3. Check for cached viewer data in diff_data (only for default evidence)
+    // 3. IMAGE VIEWER: return signed URL + extracted text, no highlights
+    if (isImageType(mimeType)) {
+      const signedUrl = await getSignedUrl(filePath, 300);
+      const extractedText = analysis.diff_data?.extracted_text || analysis.findings?.extracted_text || '';
+
+      return res.json({
+        success: true,
+        viewer: {
+          analysisId,
+          fileType: 'image',
+          signedUrl,
+          documentText: extractedText, // OCR text for reference
+          documentHtml: null,
+          highlightRanges: [], // No text highlighting for images
+          currentEvidenceId: activeEvidence.id,
+        },
+        analysis: {
+          id: analysis.id,
+          status: analysis.status,
+          compliance_percentage: analysis.compliance_percentage,
+          confidence_score: analysis.confidence_score,
+          summary: analysis.summary,
+          findings: analysis.findings,
+          diff_data: {
+            requirement_coverage: analysis.diff_data?.requirement_coverage,
+            statistics: analysis.diff_data?.statistics,
+            side_by_side: analysis.diff_data?.side_by_side,
+            recommendations: analysis.diff_data?.recommendations,
+            critical_gaps: analysis.diff_data?.critical_gaps,
+          },
+        },
+        evidenceSources: sources.length > 0 ? sources : null,
+        evidence: {
+          id: activeEvidence.id,
+          fileName: activeEvidence.file_name,
+          fileType: activeEvidence.file_type,
+        },
+        control: analysis.controls ? {
+          id: analysis.controls.id,
+          title: analysis.controls.title,
+          controlNumber: analysis.controls.control_number,
+        } : null,
+      });
+    }
+
+    // 4. Check for cached viewer data in diff_data (only for default evidence)
     //    Alternate evidence is always freshly parsed (not cached)
     let documentText = null;
     let documentHtml = null;
@@ -470,7 +536,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
 
     const hasValidCache = !isAlternateEvidence && documentText && highlightRanges && highlightRanges.length > 0;
 
-    // 4. If not cached, download and parse the document
+    // 5. If not cached, download and parse the document
     if (!hasValidCache) {
       console.log(`📄 [Viewer] ${isAlternateEvidence ? 'Alternate' : 'First'} view for analysis ${analysisId} — downloading ${activeEvidence.file_name}`);
 
@@ -521,13 +587,13 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       }
     }
 
-    // 5. Generate signed URL for PDF viewing
+    // 6. Generate signed URL for PDF viewing
     let signedUrl = null;
     if (mimeType === 'application/pdf') {
       signedUrl = await getSignedUrl(filePath, 300);
     }
 
-    // 6. Determine file type for frontend
+    // 7. Determine file type for frontend
     let fileType = 'text';
     if (mimeType === 'application/pdf') {
       fileType = 'pdf';
@@ -535,7 +601,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       fileType = 'docx';
     }
 
-    // 7. Return viewer response
+    // 8. Return viewer response
     res.json({
       success: true,
       viewer: {
@@ -1038,31 +1104,46 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
 
     console.log(`📎 ${evidenceFiles.length} evidence file(s) attached to parent`);
 
-    // 4. Download and parse all evidence (dedupe by file_path)
+    // 4. Download and parse all evidence (dedupe by file_path) — separate text and images
     const seenPaths = new Set();
     const parsedDocs = [];
+    const parsedImages = [];
 
     for (const ev of evidenceFiles) {
-      const filePath = ev.file_path;
-      if (!filePath || seenPaths.has(filePath)) continue;
-      seenPaths.add(filePath);
+      const evFilePath = ev.file_path;
+      if (!evFilePath || seenPaths.has(evFilePath)) continue;
+      seenPaths.add(evFilePath);
 
       try {
-        const tempPath = await downloadFile(filePath);
+        const tempPath = await downloadFile(evFilePath);
         tempFiles.push(tempPath);
         const mimeType = ev.file_type || 'text/plain';
-        const text = await parseDocument(tempPath, mimeType);
-        parsedDocs.push({ evidence: ev, text });
+
+        if (isImageType(mimeType)) {
+          const imageBase64 = fs.readFileSync(tempPath).toString('base64');
+          parsedImages.push({ evidence: ev, base64: imageBase64, mimeType });
+        } else {
+          const text = await parseDocument(tempPath, mimeType);
+          parsedDocs.push({ evidence: ev, text });
+        }
       } catch (parseErr) {
         console.error(`❌ Failed to parse ${ev.file_name}: ${parseErr.message}`);
       }
     }
 
-    if (parsedDocs.length === 0) {
+    const totalEvidenceCount = parsedDocs.length + parsedImages.length;
+    if (totalEvidenceCount === 0) {
       return res.status(400).json({ error: 'Could not parse any evidence files' });
     }
 
-    // 5. Concatenate with separators
+    // Image count guard
+    if (parsedImages.length > 10) {
+      return res.status(400).json({
+        error: `Too many image files (${parsedImages.length}). Maximum 10 images per request.`,
+      });
+    }
+
+    // 5. Concatenate text docs with separators
     const combinedText = parsedDocs.map((d, i) =>
       `\n\n=== DOCUMENT ${i + 1}: ${d.evidence.file_name} ===\n\n${d.text}`
     ).join('');
@@ -1087,20 +1168,72 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     const projectId = evidenceFiles[0].project_id || null;
     const customInstructions = await fetchCustomInstructions(projectId);
 
-    // 9. Build prompt and call GPT
-    const documentNames = parsedDocs.map(d => d.evidence.file_name);
-    const userPromptOverride = buildAnalyzeAllPrompt(combinedText, controlsList, customInstructions, documentNames);
+    // 9. Build prompt and call GPT — branch for mixed content
+    const documentNames = [...parsedDocs.map(d => d.evidence.file_name), ...parsedImages.map(d => d.evidence.file_name)];
+    let gptResult;
 
-    console.log(`🤖 Sending ${parsedDocs.length} docs + ${controlsToAnalyze.length} controls to GPT...`);
-    const gptResult = await analyzeEvidence(combinedText, 'multiple controls', parentControl.title, customInstructions, { userPromptOverride });
+    if (parsedImages.length > 0) {
+      // ── MIXED CONTENT: text docs + images → vision API ──
+      const textPrompt = buildAnalyzeAllPrompt(
+        combinedText || '(No text documents — all evidence is image-based)',
+        controlsList, customInstructions, documentNames
+      );
+
+      const contentParts = [{ type: 'text', text: textPrompt }];
+      for (const img of parsedImages) {
+        contentParts.push({ type: 'text', text: `\n=== IMAGE EVIDENCE: ${img.evidence.file_name} ===` });
+        contentParts.push({
+          type: 'image_url',
+          image_url: { url: `data:${img.mimeType};base64,${img.base64}`, detail: 'high' },
+        });
+      }
+
+      console.log(`🤖 Sending ${totalEvidenceCount} evidence (${parsedDocs.length} text + ${parsedImages.length} images) + ${controlsToAnalyze.length} controls to GPT-4o vision...`);
+
+      const OpenAI = require('openai');
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: `You are an expert compliance auditor. Analyze the provided evidence (documents and images) against multiple compliance controls. For images, extract all readable text and analyze visual content. You must respond with valid JSON only.` },
+          { role: 'user', content: contentParts },
+        ],
+        temperature: 0.2,
+        max_tokens: 16384,
+        response_format: { type: 'json_object' },
+      });
+
+      const choice = response.choices[0];
+      let analysis;
+      try {
+        analysis = JSON.parse(choice.message.content);
+      } catch (e) {
+        throw new Error('GPT returned invalid JSON for mixed analyze-all');
+      }
+
+      // Minimal normalization
+      analysis.status = analysis.overall_status || analysis.status || 'non_compliant';
+      analysis.controls = Array.isArray(analysis.controls) ? analysis.controls : [];
+      gptResult = { analysis, model: response.model, usage: response.usage, finish_reason: choice.finish_reason };
+    } else {
+      // ── TEXT-ONLY: existing path ──
+      const userPromptOverride = buildAnalyzeAllPrompt(combinedText, controlsList, customInstructions, documentNames);
+      console.log(`🤖 Sending ${parsedDocs.length} docs + ${controlsToAnalyze.length} controls to GPT...`);
+      gptResult = await analyzeEvidence(combinedText, 'multiple controls', parentControl.title, customInstructions, { userPromptOverride });
+    }
 
     // 10. Parse per-control results from GPT response
     const gptControls = gptResult.analysis.controls || [];
-    const evidenceSources = parsedDocs.map(d => ({
-      id: d.evidence.id,
-      fileName: d.evidence.file_name,
-      fileType: d.evidence.file_type,
-      filePath: d.evidence.file_path,
+    const allEvidenceForSources = [
+      ...parsedDocs.map(d => d.evidence),
+      ...parsedImages.map(d => d.evidence),
+    ];
+    const evidenceSources = allEvidenceForSources.map(ev => ({
+      id: ev.id,
+      fileName: ev.file_name,
+      fileType: ev.file_type,
+      filePath: ev.file_path,
     }));
 
     // 11. Save one analysis_results per control
@@ -1153,7 +1286,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       diffData.evidence_sources = evidenceSources;
 
       const analysisRecord = {
-        evidence_id: parsedDocs[0].evidence.id,
+        evidence_id: allEvidenceForSources[0].id,
         control_id: child.id,
         project_id: projectId,
         analyzed_at: new Date().toISOString(),
@@ -1192,7 +1325,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         compliance_percentage: controlAnalysis.compliance_percentage,
         confidence_score: controlAnalysis.confidence_score,
         summary: controlAnalysis.summary,
-        evidence_count: parsedDocs.length,
+        evidence_count: totalEvidenceCount,
       });
 
       console.log(`✅ ${child.control_number}: ${controlAnalysis.status} (${controlAnalysis.compliance_percentage}%)`);
@@ -1213,9 +1346,9 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         control_number: parentControl.control_number,
         title: parentControl.title,
       },
-      evidence_files: parsedDocs.map(d => ({
-        id: d.evidence.id,
-        name: d.evidence.file_name,
+      evidence_files: allEvidenceForSources.map(ev => ({
+        id: ev.id,
+        name: ev.file_name,
       })),
       overall: {
         status: gptResult.analysis.overall_status || aggregate.overall_status,
@@ -1226,7 +1359,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         model: gptResult.model,
         tokens_used: gptResult.usage,
         analyzed_at: new Date().toISOString(),
-        documents_analyzed: parsedDocs.length,
+        documents_analyzed: totalEvidenceCount,
         controls_analyzed: controlsToAnalyze.length,
       },
     });
@@ -1287,40 +1420,57 @@ router.post('/multi-evidence/:controlId', async (req, res) => {
 
     console.log(`📐 Control: ${controlName} (${control.control_number || ''})`);
 
-    // 3. Download and parse ALL documents in parallel
-    const parsedDocs = await Promise.all(evidenceFiles.map(async (ev) => {
+    // 3. Download and parse ALL documents in parallel — separate text and image evidence
+    const parsedTextDocs = [];
+    const parsedImageDocs = [];
+
+    await Promise.all(evidenceFiles.map(async (ev) => {
       const filePath = ev.file_path;
       if (!filePath) {
         console.warn(`⚠️ Evidence ${ev.id} (${ev.file_name}) has no file path — skipping`);
-        return null;
+        return;
       }
 
       try {
         const tempPath = await downloadFile(filePath);
         tempFiles.push(tempPath);
         const mimeType = ev.file_type || 'text/plain';
-        const text = await parseDocument(tempPath, mimeType);
-        return { evidence: ev, text };
+
+        if (isImageType(mimeType)) {
+          // Image evidence — read as base64
+          const imageBase64 = fs.readFileSync(tempPath).toString('base64');
+          parsedImageDocs.push({ evidence: ev, base64: imageBase64, mimeType });
+          console.log(`🖼️ Image evidence: ${ev.file_name} (${Math.round(imageBase64.length / 1024)}KB base64)`);
+        } else {
+          // Text evidence — parse normally
+          const text = await parseDocument(tempPath, mimeType);
+          parsedTextDocs.push({ evidence: ev, text });
+        }
       } catch (parseErr) {
         console.error(`❌ Failed to parse ${ev.file_name}: ${parseErr.message}`);
-        return null;
       }
     }));
 
-    // Filter out any that failed
-    const validDocs = parsedDocs.filter(Boolean);
-    if (validDocs.length === 0) {
+    const totalDocs = parsedTextDocs.length + parsedImageDocs.length;
+    if (totalDocs === 0) {
       return res.status(400).json({ error: 'Could not parse any evidence files' });
     }
 
-    console.log(`📄 Successfully parsed ${validDocs.length} of ${evidenceFiles.length} documents`);
+    // Image count guard
+    if (parsedImageDocs.length > 10) {
+      return res.status(400).json({
+        error: `Too many image files (${parsedImageDocs.length}). Maximum 10 images per request.`,
+      });
+    }
 
-    // 4. Concatenate documents with clear separators
-    const combinedText = validDocs.map((d, i) =>
+    console.log(`📄 Successfully parsed ${totalDocs} evidence files (${parsedTextDocs.length} text, ${parsedImageDocs.length} images)`);
+
+    // 4. Concatenate text documents with clear separators
+    const combinedText = parsedTextDocs.map((d, i) =>
       `\n\n=== DOCUMENT ${i + 1}: ${d.evidence.file_name} ===\n\n${d.text}`
     ).join('');
 
-    // 5. Token limit guard (~100K tokens ≈ 400K chars)
+    // 5. Token limit guard (~100K tokens ≈ 400K chars) for text portion
     if (combinedText.length > 400000) {
       return res.status(400).json({
         error: 'Combined document text is too large for a single analysis',
@@ -1333,29 +1483,112 @@ router.post('/multi-evidence/:controlId', async (req, res) => {
     // 6. Fetch custom instructions
     const customInstructions = await fetchCustomInstructions(evidenceFiles[0].project_id);
 
-    // 7. Build multi-evidence prompt and call GPT
-    const documentNames = validDocs.map(d => d.evidence.file_name);
-    const userPromptOverride = buildMultiEvidenceUserPrompt(
-      combinedText, requirementText, controlName, customInstructions, documentNames
-    );
+    // 7. Build prompt and call GPT — branch for mixed content (text + images)
+    const allDocNames = [...parsedTextDocs.map(d => d.evidence.file_name), ...parsedImageDocs.map(d => d.evidence.file_name)];
+    let gptResult;
 
-    console.log(`🤖 Sending ${validDocs.length} documents (${combinedText.length} chars combined) to GPT for consolidated analysis...`);
-    const gptResult = await analyzeEvidence(combinedText, requirementText, controlName, customInstructions, { userPromptOverride });
+    if (parsedImageDocs.length > 0) {
+      // ── MIXED CONTENT: text docs + image docs → use vision API content array ──
+      const textPrompt = buildMultiEvidenceUserPrompt(
+        combinedText || '(No text documents provided — all evidence is image-based)',
+        requirementText, controlName, customInstructions, allDocNames
+      );
+
+      // Build content array: text prompt + image parts
+      const contentParts = [{ type: 'text', text: textPrompt }];
+      for (const img of parsedImageDocs) {
+        contentParts.push({ type: 'text', text: `\n=== IMAGE EVIDENCE: ${img.evidence.file_name} ===` });
+        contentParts.push({
+          type: 'image_url',
+          image_url: { url: `data:${img.mimeType};base64,${img.base64}`, detail: 'high' },
+        });
+      }
+
+      console.log(`🤖 Sending ${totalDocs} docs (${parsedTextDocs.length} text + ${parsedImageDocs.length} images) to GPT-4o vision...`);
+
+      // Call GPT directly with content array (vision API format)
+      const OpenAI = require('openai');
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: `You are an expert compliance auditor. You are analyzing a mix of text documents and images as compliance evidence. For images, first extract all readable text (OCR), then analyze the visual content. ${customInstructions ? `Custom instructions: ${customInstructions}` : ''}` },
+          { role: 'user', content: contentParts },
+        ],
+        temperature: 0.2,
+        max_tokens: 16384,
+        response_format: { type: 'json_object' },
+      });
+
+      const choice = response.choices[0];
+      let analysis;
+      try {
+        analysis = JSON.parse(choice.message.content);
+      } catch (e) {
+        throw new Error('GPT returned invalid JSON for mixed content analysis');
+      }
+
+      // Normalize
+      if (!analysis.status) analysis.status = 'non_compliant';
+      if (!analysis.requirements_breakdown) {
+        analysis.requirements_breakdown = analysis.breakdown || analysis.sub_requirements || analysis.requirements || [];
+      }
+      if (!Array.isArray(analysis.requirements_breakdown)) {
+        analysis.requirements_breakdown = [];
+      }
+      analysis.requirements_breakdown = analysis.requirements_breakdown.map((item, i) => ({
+        requirement_id: item.requirement_id || `REQ-${i + 1}`,
+        requirement_text: item.requirement_text || item.text || 'Sub-requirement',
+        status: item.status || 'missing',
+        evidence_found: item.evidence_found || null,
+        evidence_source: item.evidence_source || null,
+        evidence_location: item.evidence_location || { start_index: -1, end_index: -1, section_context: null },
+        gap_description: item.gap_description || null,
+        confidence: parseFloat(item.confidence || 0.5),
+      }));
+      analysis.confidence_score = parseFloat(analysis.confidence_score || 0);
+      analysis.compliance_percentage = parseInt(analysis.compliance_percentage || 0, 10);
+      analysis.summary = analysis.summary || '';
+      analysis.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
+      analysis.critical_gaps = Array.isArray(analysis.critical_gaps) ? analysis.critical_gaps : [];
+
+      gptResult = { analysis, model: response.model, usage: response.usage, finish_reason: choice.finish_reason };
+    } else {
+      // ── TEXT-ONLY: existing path ──
+      const userPromptOverride = buildMultiEvidenceUserPrompt(
+        combinedText, requirementText, controlName, customInstructions, allDocNames
+      );
+      console.log(`🤖 Sending ${parsedTextDocs.length} documents (${combinedText.length} chars combined) to GPT for consolidated analysis...`);
+      gptResult = await analyzeEvidence(combinedText, requirementText, controlName, customInstructions, { userPromptOverride });
+    }
 
     // 8. Generate diff visualization
     const diffData = generateDiff(gptResult.analysis, requirementText);
 
+    // Combine all evidence sources (text + image)
+    const allEvidence = [
+      ...parsedTextDocs.map(d => d.evidence),
+      ...parsedImageDocs.map(d => d.evidence),
+    ];
+
     // Add evidence_sources to diff_data for multi-doc viewer
-    diffData.evidence_sources = validDocs.map(d => ({
-      id: d.evidence.id,
-      fileName: d.evidence.file_name,
-      fileType: d.evidence.file_type,
-      filePath: d.evidence.file_path,
+    diffData.evidence_sources = allEvidence.map(ev => ({
+      id: ev.id,
+      fileName: ev.file_name,
+      fileType: ev.file_type,
+      filePath: ev.file_path,
     }));
 
+    // Store extracted text from images if any
+    if (parsedImageDocs.length > 0) {
+      diffData.has_images = true;
+    }
+
     // 9. Save ONE consolidated analysis_results record
+    const firstEvidence = parsedTextDocs[0]?.evidence || parsedImageDocs[0]?.evidence;
     const analysisRecord = {
-      evidence_id: validDocs[0].evidence.id, // FK constraint: use first evidence
+      evidence_id: firstEvidence.id, // FK constraint: use first evidence
       control_id: controlId,
       project_id: evidenceFiles[0].project_id || null,
       analyzed_at: new Date().toISOString(),
@@ -1406,15 +1639,15 @@ router.post('/multi-evidence/:controlId', async (req, res) => {
         control_number: control.control_number,
         framework: control.frameworks?.name || null,
       },
-      evidence_files: validDocs.map(d => ({
-        id: d.evidence.id,
-        name: d.evidence.file_name,
+      evidence_files: allEvidence.map(ev => ({
+        id: ev.id,
+        name: ev.file_name,
       })),
       metadata: {
         model: gptResult.model,
         tokens_used: gptResult.usage,
         analyzed_at: savedAnalysis.analyzed_at,
-        documents_analyzed: validDocs.length,
+        documents_analyzed: totalDocs,
       },
     });
   } catch (err) {

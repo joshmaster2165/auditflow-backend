@@ -7,7 +7,20 @@ const SUPPORTED_TYPES = {
   'application/pdf': 'pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
   'text/plain': 'text',
+  'image/png': 'image',
+  'image/jpeg': 'image',
+  'image/webp': 'image',
+  'image/gif': 'image',
 };
+
+/**
+ * Check if a MIME type is an image that requires vision-based analysis.
+ * @param {string} mimeType
+ * @returns {boolean}
+ */
+function isImageType(mimeType) {
+  return SUPPORTED_TYPES[mimeType] === 'image';
+}
 
 async function parseDocument(filePath, mimeType) {
   console.log(`📝 Parsing document: ${path.basename(filePath)} (${mimeType})`);
@@ -32,6 +45,11 @@ async function parseDocument(filePath, mimeType) {
       case 'text':
         text = await parseText(filePath);
         break;
+      case 'image':
+        // Images cannot be text-parsed locally — return null to signal
+        // the caller should use GPT-4o vision API instead
+        console.log(`🖼️ Image file detected (${mimeType}) — requires vision analysis`);
+        return null;
     }
   } catch (err) {
     throw new Error(`Failed to parse ${type} file: ${err.message}`);
@@ -101,6 +119,11 @@ async function parseDocumentForViewer(filePath, mimeType) {
       // html stays null — frontend renders plain text directly
       text = await parseText(filePath);
       break;
+    case 'image':
+      // Images are displayed via signed URL — no text parsing needed
+      // OCR text is stored in analysis.diff_data.extracted_text by the GPT vision call
+      console.log(`🖼️ Image file for viewer — will use signed URL`);
+      return { html: null, text: null, fileType: 'image' };
   }
 
   if (!text || text.trim().length === 0) {
@@ -111,4 +134,4 @@ async function parseDocumentForViewer(filePath, mimeType) {
   return { html, text: text.trim(), fileType: type };
 }
 
-module.exports = { parseDocument, parseDocumentForViewer };
+module.exports = { parseDocument, parseDocumentForViewer, isImageType };
