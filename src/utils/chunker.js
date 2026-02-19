@@ -8,6 +8,7 @@
 
 const MAX_CHARS_PER_CHUNK = 100000;
 const OVERLAP_CHARS = 500;
+const MIN_CHUNK_FACTOR = 0.8; // Don't shrink below 80% of target chunk size
 
 /**
  * Split text into chunks, breaking at paragraph/line boundaries when possible.
@@ -19,7 +20,7 @@ function chunkText(text, maxChars = MAX_CHARS_PER_CHUNK, overlap = OVERLAP_CHARS
     return [text];
   }
 
-  const minChunkSize = Math.floor(maxChars * 0.8); // Don't shrink below 80% of target
+  const minChunkSize = Math.floor(maxChars * MIN_CHUNK_FACTOR);
   const chunks = [];
   let start = 0;
 

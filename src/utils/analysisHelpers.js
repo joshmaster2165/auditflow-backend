@@ -2,6 +2,8 @@ const { supabase } = require('./supabase');
 const { analyzeEvidence, analyzeImageEvidence } = require('../services/gpt');
 const { generateDiff } = require('../services/diffGenerator');
 
+const RATE_LIMIT_RETRY_DELAY_MS = 60000;
+
 /**
  * Build a standardized analysis_results DB record.
  * Replaces 4+ identical object literals scattered across groupAnalysis.js and analyze.js.
@@ -98,7 +100,7 @@ async function analyzeControlWithRetry({
     // Rate limit retry (once)
     if (err.message?.includes('429') || err.message?.toLowerCase().includes('rate limit')) {
       console.log(`\u23f3 [${logPrefix}] Rate limited. Waiting 60s before retrying ${control.control_number}...`);
-      await new Promise(r => setTimeout(r, 60000));
+      await new Promise(r => setTimeout(r, RATE_LIMIT_RETRY_DELAY_MS));
 
       try {
         const gptResult = await runAnalysis();

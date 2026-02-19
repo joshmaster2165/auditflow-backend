@@ -12,6 +12,10 @@ const { createJobStore } = require('../utils/analysisHelpers');
 // stays alive and the job Map is preserved (job gets marked as 'failed').
 const jobs = createJobStore({ processingTimeoutMs: 20 * 60 * 1000 });
 
+// ── Constants ──
+const ENHANCE_BATCH_SIZE = 100;
+const MAX_CONTROLS_FOR_ENHANCEMENT = 500;
+
 // ── POST /api/framework/parse — Start async processing in worker thread ──
 router.post('/parse', upload.single('file'), async (req, res) => {
   try {
@@ -150,9 +154,9 @@ router.post('/enhance', async (req, res) => {
       return res.status(400).json({ error: 'controls array is required and must not be empty' });
     }
 
-    if (controls.length > 500) {
+    if (controls.length > MAX_CONTROLS_FOR_ENHANCEMENT) {
       return res.status(400).json({
-        error: 'Too many controls for enhancement. Maximum is 500. Consider enhancing in batches.',
+        error: `Too many controls for enhancement. Maximum is ${MAX_CONTROLS_FOR_ENHANCEMENT}. Consider enhancing in batches.`,
       });
     }
 
@@ -167,7 +171,7 @@ router.post('/enhance', async (req, res) => {
     };
     let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 
-    const batchSize = 100;
+    const batchSize = ENHANCE_BATCH_SIZE;
     const batches = [];
     for (let i = 0; i < controls.length; i += batchSize) {
       batches.push(controls.slice(i, i + batchSize));

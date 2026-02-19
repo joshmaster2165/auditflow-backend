@@ -4,6 +4,12 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+// ── GPT Configuration Constants ──
+const GPT_MODEL = 'gpt-4o';
+const GPT_MAX_TOKENS = 16384;
+const GPT_TEMPERATURE = 0.2;
+const GPT_EXTRACTION_TEMPERATURE = 0.1;
+
 /**
  * Shared OpenAI error handler — maps API error codes to user-friendly messages.
  * Replaces identical catch blocks across all GPT functions.
@@ -260,13 +266,13 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: GPT_MODEL,
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userPromptOverride || buildUserPrompt(documentText, requirementText, controlName, customInstructions) },
       ],
-      temperature: 0.2,
-      max_tokens: 16384,
+      temperature: GPT_TEMPERATURE,
+      max_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
 
@@ -434,7 +440,7 @@ async function analyzeImageEvidence(imageBase64, mimeType, requirementText, cont
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: GPT_MODEL,
       messages: [
         { role: 'system', content: IMAGE_SYSTEM_PROMPT },
         {
@@ -445,8 +451,8 @@ async function analyzeImageEvidence(imageBase64, mimeType, requirementText, cont
           ],
         },
       ],
-      temperature: 0.2,
-      max_tokens: 16384,
+      temperature: GPT_TEMPERATURE,
+      max_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
 
@@ -600,13 +606,13 @@ async function extractFrameworkControls(documentText, context = {}) {
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: GPT_MODEL,
       messages: [
         { role: 'system', content: FRAMEWORK_EXTRACTION_PROMPT },
         { role: 'user', content: buildFrameworkExtractionPrompt(documentText, context) },
       ],
-      temperature: 0.1,
-      max_tokens: 16384,
+      temperature: GPT_EXTRACTION_TEMPERATURE,
+      max_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
 
@@ -783,13 +789,13 @@ async function extractControlsFromTabular(textData, context = {}) {
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: GPT_MODEL,
       messages: [
         { role: 'system', content: TABULAR_EXTRACTION_PROMPT },
         { role: 'user', content: buildTabularExtractionPrompt(textData, context) },
       ],
-      temperature: 0.1,
-      max_tokens: 16384,
+      temperature: GPT_EXTRACTION_TEMPERATURE,
+      max_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
 
@@ -935,13 +941,13 @@ async function enhanceFrameworkControls(controls, context = {}) {
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: GPT_MODEL,
       messages: [
         { role: 'system', content: FRAMEWORK_ENHANCE_PROMPT },
         { role: 'user', content: buildEnhancePrompt(controls, context) },
       ],
-      temperature: 0.2,
-      max_tokens: 16384,
+      temperature: GPT_TEMPERATURE,
+      max_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
 

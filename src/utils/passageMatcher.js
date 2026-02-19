@@ -6,6 +6,11 @@
  * Four tiers: exact offset → indexOf → whitespace-normalized → fuzzy sliding window.
  */
 
+// ── Fuzzy Matching Configuration ──
+const FUZZY_MIN_SIMILARITY = 0.4;       // Minimum Jaccard score to accept a fuzzy match (40% word overlap)
+const FUZZY_MIN_WINDOW_FACTOR = 0.5;    // Smallest window = 50% of quote length
+const FUZZY_MAX_WINDOW_FACTOR = 2.0;    // Largest window = 200% of quote length
+
 /**
  * Collapse all whitespace (spaces, tabs, newlines) into single spaces and trim.
  */
@@ -113,8 +118,8 @@ function fuzzyMatch(documentText, quote) {
     const windowText = documentText.substring(windowStart, windowEnd);
 
     // Try different-sized slices within this window
-    const minLen = Math.floor(quote.length * 0.5);
-    const maxLen = Math.floor(quote.length * 2.0);
+    const minLen = Math.floor(quote.length * FUZZY_MIN_WINDOW_FACTOR);
+    const maxLen = Math.floor(quote.length * FUZZY_MAX_WINDOW_FACTOR);
     const step = Math.max(20, Math.floor(quote.length * 0.15));
 
     for (let len = minLen; len <= maxLen; len += step) {
@@ -133,7 +138,7 @@ function fuzzyMatch(documentText, quote) {
   }
 
   // Only accept if similarity is decent (0.4 = 40% word overlap)
-  if (bestScore >= 0.4 && bestStart >= 0) {
+  if (bestScore >= FUZZY_MIN_SIMILARITY && bestStart >= 0) {
     // Snap to paragraph boundaries for cleaner highlights
     const paraStart = documentText.lastIndexOf('\n', bestStart);
     const paraEnd = documentText.indexOf('\n', bestEnd);

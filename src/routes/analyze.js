@@ -10,6 +10,10 @@ const { generateDiff, generateHtmlExport } = require('../services/diffGenerator'
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore, buildPerEvidenceBreakdown } = require('../utils/analysisHelpers');
 
+// ── Constants ──
+const MAX_COMBINED_TEXT_CHARS = 400000;
+const MAX_IMAGE_FILES = 10;
+
 // ── In-memory job store for async group analysis ──
 const jobs = createJobStore({ processingTimeoutMs: 20 * 60 * 1000 });
 
@@ -1190,9 +1194,9 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     }
 
     // Image count guard
-    if (parsedImages.length > 10) {
+    if (parsedImages.length > MAX_IMAGE_FILES) {
       return res.status(400).json({
-        error: `Too many image files (${parsedImages.length}). Maximum 10 images per request.`,
+        error: `Too many image files (${parsedImages.length}). Maximum ${MAX_IMAGE_FILES} images per request.`,
       });
     }
 
@@ -1202,7 +1206,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     ).join('');
 
     // 6. Token limit guard
-    if (combinedText.length > 400000) {
+    if (combinedText.length > MAX_COMBINED_TEXT_CHARS) {
       return res.status(400).json({
         error: 'Combined evidence is too large for a single analysis',
         combined_length: combinedText.length,
@@ -1517,9 +1521,9 @@ router.post('/multi-evidence/:controlId', async (req, res) => {
     }
 
     // Image count guard
-    if (parsedImageDocs.length > 10) {
+    if (parsedImageDocs.length > MAX_IMAGE_FILES) {
       return res.status(400).json({
-        error: `Too many image files (${parsedImageDocs.length}). Maximum 10 images per request.`,
+        error: `Too many image files (${parsedImageDocs.length}). Maximum ${MAX_IMAGE_FILES} images per request.`,
       });
     }
 
@@ -1531,11 +1535,11 @@ router.post('/multi-evidence/:controlId', async (req, res) => {
     ).join('');
 
     // 5. Token limit guard (~100K tokens ≈ 400K chars) for text portion
-    if (combinedText.length > 400000) {
+    if (combinedText.length > MAX_COMBINED_TEXT_CHARS) {
       return res.status(400).json({
         error: 'Combined document text is too large for a single analysis',
         combined_length: combinedText.length,
-        max_length: 400000,
+        max_length: MAX_COMBINED_TEXT_CHARS,
         hint: 'Try reducing the number of evidence files or splitting large documents',
       });
     }
