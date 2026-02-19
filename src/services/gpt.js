@@ -166,6 +166,72 @@ For evidence_location: Count the character position (0-indexed) where your quote
 Break the requirement into its natural sub-requirements — use as many or as few as the requirement warrants. A sub-requirement can be satisfied by evidence from ANY of the documents.`;
 }
 
+/**
+ * Build an "analyze all controls" prompt: N evidence documents + N controls in one GPT call.
+ * GPT evaluates each control independently against all evidence and returns per-control results.
+ *
+ * @param {string} combinedDocumentText - All evidence docs concatenated with separators
+ * @param {Array<{control_number: string, title: string, requirementText: string}>} controls - Child controls to evaluate
+ * @param {string|null} customInstructions - Project-level custom instructions
+ * @param {string[]} documentNames - Array of evidence filenames
+ */
+function buildAnalyzeAllPrompt(combinedDocumentText, controls, customInstructions, documentNames) {
+  const controlsList = controls.map((c, i) =>
+    `### Control ${i + 1}: ${c.control_number} — ${c.title}\n${c.requirementText}`
+  ).join('\n\n');
+
+  return `You are analyzing multiple evidence documents against multiple compliance controls. Evaluate EACH control independently using evidence from ANY of the provided documents.
+
+## Evidence Documents (${documentNames.length} documents):
+${combinedDocumentText}
+
+## Controls to Evaluate (${controls.length} controls):
+
+${controlsList}
+${customInstructions ? `
+## Custom Analysis Instructions:
+The following project-level guidance MUST be applied to this analysis. These instructions take priority over default analysis behavior:
+${customInstructions}
+` : ''}
+## Output Format:
+Return a JSON object. You MUST evaluate every control listed above. For each control, provide a complete compliance assessment:
+
+{
+  "overall_status": "compliant" | "partial" | "non_compliant",
+  "overall_compliance_percentage": <number 0-100 average across all controls>,
+  "overall_summary": "<1-2 sentence summary across all controls>",
+  "controls": [
+    {
+      "control_number": "<exact control number from above, e.g. '3.1'>",
+      "control_title": "<exact control title from above>",
+      "status": "compliant" | "partial" | "non_compliant",
+      "compliance_percentage": <number 0-100>,
+      "confidence_score": <number 0.0-1.0>,
+      "summary": "<concise summary for this specific control>",
+      "requirements_breakdown": [
+        {
+          "requirement_id": "<short ID like REQ-1>",
+          "requirement_text": "<the sub-requirement being tested>",
+          "status": "met" | "partial" | "missing",
+          "evidence_found": "<EXACT verbatim quote copied character-for-character from a document, or null>",
+          "evidence_source": "<exact filename of the document this evidence came from>",
+          "gap_description": "<what is missing, or null if fully met>",
+          "confidence": <number 0.0-1.0>
+        }
+      ],
+      "recommendations": ["<actionable recommendation>", ...],
+      "critical_gaps": ["<critical finding>", ...]
+    }
+  ]
+}
+
+CRITICAL: You MUST include ALL ${controls.length} controls in the "controls" array — one entry per control listed above.
+CRITICAL for evidence_found: Copy text EXACTLY character-for-character from the document. Do NOT paraphrase.
+CRITICAL for evidence_source: Specify the exact filename from the "=== DOCUMENT N: filename ===" headers.
+
+Each control should be evaluated independently. A piece of evidence in any document can satisfy requirements for multiple controls.`;
+}
+
 async function analyzeEvidence(documentText, requirementText, controlName, customInstructions, { userPromptOverride } = {}) {
   // Input validation — fail fast with clear message instead of sending garbage to GPT
   if (!documentText || documentText.trim().length < 10) {
@@ -724,4 +790,4 @@ async function enhanceFrameworkControls(controls, context = {}) {
   }
 }
 
-module.exports = { analyzeEvidence, buildMultiEvidenceUserPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls };
+module.exports = { analyzeEvidence, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls };

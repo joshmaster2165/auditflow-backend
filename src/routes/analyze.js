@@ -4,7 +4,7 @@ const router = express.Router();
 const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/supabase');
 const { parseDocument, parseDocumentForViewer } = require('../services/documentParser');
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
-const { analyzeEvidence, buildMultiEvidenceUserPrompt } = require('../services/gpt');
+const { analyzeEvidence, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore } = require('../utils/analysisHelpers');
@@ -872,6 +872,273 @@ router.post('/group-by-ids/:evidenceId', async (req, res) => {
       error: 'Failed to start group analysis',
       details: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ANALYZE ALL CONTROLS
+// All evidence from parent + all child requirements → one GPT call
+// ══════════════════════════════════════════════════════════════════════════════
+
+// POST /api/analyze/analyze-all/:parentControlId — Validate all child controls at once
+router.post('/analyze-all/:parentControlId', async (req, res) => {
+  const tempFiles = [];
+
+  try {
+    const { parentControlId } = req.params;
+    console.log(`\n🔍 Starting ANALYZE-ALL for parent control: ${parentControlId}`);
+
+    // 1. Fetch parent control with framework
+    const { data: parentControl, error: parentError } = await supabase
+      .from('controls')
+      .select('*, frameworks:framework_id (*)')
+      .eq('id', parentControlId)
+      .single();
+
+    if (parentError || !parentControl) {
+      return res.status(404).json({ error: 'Parent control not found', details: parentError?.message });
+    }
+
+    // 2. Fetch all child controls under this parent
+    const { data: childControls, error: childError } = await supabase
+      .from('controls')
+      .select('*, frameworks:framework_id (*)')
+      .eq('framework_id', parentControl.framework_id)
+      .eq('parent_control_number', parentControl.control_number)
+      .order('sort_order', { ascending: true });
+
+    if (childError) {
+      return res.status(500).json({ error: 'Failed to fetch child controls', details: childError.message });
+    }
+
+    if (!childControls || childControls.length === 0) {
+      return res.status(400).json({
+        error: `No child controls found under ${parentControl.control_number} (${parentControl.title}).`,
+      });
+    }
+
+    console.log(`📐 Parent: ${parentControl.control_number} - ${parentControl.title}`);
+    console.log(`📊 ${childControls.length} child controls to evaluate`);
+
+    // 3. Fetch all evidence attached to the PARENT control
+    const { data: evidenceFiles, error: evidenceError } = await supabase
+      .from('evidence')
+      .select('*')
+      .eq('control_id', parentControlId)
+      .order('uploaded_at', { ascending: true });
+
+    if (evidenceError) {
+      return res.status(500).json({ error: 'Failed to fetch evidence files', details: evidenceError.message });
+    }
+
+    if (!evidenceFiles || evidenceFiles.length === 0) {
+      return res.status(404).json({
+        error: 'No evidence files found. Upload evidence to this category before validating.',
+      });
+    }
+
+    console.log(`📎 ${evidenceFiles.length} evidence file(s) attached to parent`);
+
+    // 4. Download and parse all evidence (dedupe by file_path)
+    const seenPaths = new Set();
+    const parsedDocs = [];
+
+    for (const ev of evidenceFiles) {
+      const filePath = ev.file_path;
+      if (!filePath || seenPaths.has(filePath)) continue;
+      seenPaths.add(filePath);
+
+      try {
+        const tempPath = await downloadFile(filePath);
+        tempFiles.push(tempPath);
+        const mimeType = ev.file_type || 'text/plain';
+        const text = await parseDocument(tempPath, mimeType);
+        parsedDocs.push({ evidence: ev, text });
+      } catch (parseErr) {
+        console.error(`❌ Failed to parse ${ev.file_name}: ${parseErr.message}`);
+      }
+    }
+
+    if (parsedDocs.length === 0) {
+      return res.status(400).json({ error: 'Could not parse any evidence files' });
+    }
+
+    // 5. Concatenate with separators
+    const combinedText = parsedDocs.map((d, i) =>
+      `\n\n=== DOCUMENT ${i + 1}: ${d.evidence.file_name} ===\n\n${d.text}`
+    ).join('');
+
+    // 6. Token limit guard
+    if (combinedText.length > 400000) {
+      return res.status(400).json({
+        error: 'Combined evidence is too large for a single analysis',
+        combined_length: combinedText.length,
+        hint: 'Try reducing the number or size of evidence files',
+      });
+    }
+
+    // 7. Build controls list with enriched requirement text
+    const controlsList = childControls.map(c => ({
+      control_number: c.control_number || '',
+      title: c.title || 'Unnamed Control',
+      requirementText: buildRequirementText(c, c.frameworks),
+    }));
+
+    // 8. Fetch custom instructions
+    const projectId = evidenceFiles[0].project_id || null;
+    const customInstructions = await fetchCustomInstructions(projectId);
+
+    // 9. Build prompt and call GPT
+    const documentNames = parsedDocs.map(d => d.evidence.file_name);
+    const userPromptOverride = buildAnalyzeAllPrompt(combinedText, controlsList, customInstructions, documentNames);
+
+    console.log(`🤖 Sending ${parsedDocs.length} docs + ${childControls.length} controls to GPT...`);
+    const gptResult = await analyzeEvidence(combinedText, 'multiple controls', parentControl.title, customInstructions, { userPromptOverride });
+
+    // 10. Parse per-control results from GPT response
+    const gptControls = gptResult.analysis.controls || [];
+    const evidenceSources = parsedDocs.map(d => ({
+      id: d.evidence.id,
+      fileName: d.evidence.file_name,
+      fileType: d.evidence.file_type,
+      filePath: d.evidence.file_path,
+    }));
+
+    // 11. Save one analysis_results per child control
+    const results = [];
+    for (const child of childControls) {
+      // Match GPT result by control_number
+      const gptCtrl = gptControls.find(g =>
+        g.control_number === child.control_number ||
+        g.control_number === (child.control_number || '').trim()
+      ) || null;
+
+      if (!gptCtrl) {
+        console.warn(`⚠️ GPT did not return result for control ${child.control_number} — skipping DB save`);
+        results.push({
+          analysis_id: null,
+          control_id: child.id,
+          control_number: child.control_number,
+          control_title: child.title,
+          status: 'error',
+          error: 'GPT did not return a result for this control',
+          compliance_percentage: null,
+          confidence_score: null,
+          summary: null,
+        });
+        continue;
+      }
+
+      // Normalize the per-control analysis to match standard format
+      const controlAnalysis = {
+        status: gptCtrl.status || 'non_compliant',
+        confidence_score: parseFloat(gptCtrl.confidence_score || 0),
+        compliance_percentage: parseInt(gptCtrl.compliance_percentage || 0, 10),
+        summary: gptCtrl.summary || '',
+        requirements_breakdown: (gptCtrl.requirements_breakdown || []).map((item, i) => ({
+          requirement_id: item.requirement_id || `REQ-${i + 1}`,
+          requirement_text: item.requirement_text || '',
+          status: item.status || 'missing',
+          evidence_found: item.evidence_found || null,
+          evidence_source: item.evidence_source || null,
+          evidence_location: item.evidence_location || { start_index: -1, end_index: -1, section_context: null },
+          gap_description: item.gap_description || null,
+          confidence: parseFloat(item.confidence || 0.5),
+        })),
+        recommendations: Array.isArray(gptCtrl.recommendations) ? gptCtrl.recommendations : [],
+        critical_gaps: Array.isArray(gptCtrl.critical_gaps) ? gptCtrl.critical_gaps : [],
+      };
+
+      const requirementText = buildRequirementText(child, child.frameworks);
+      const diffData = generateDiff(controlAnalysis, requirementText);
+      diffData.evidence_sources = evidenceSources;
+
+      const analysisRecord = {
+        evidence_id: parsedDocs[0].evidence.id,
+        control_id: child.id,
+        project_id: projectId,
+        analyzed_at: new Date().toISOString(),
+        analysis_version: 'v1.0-all',
+        model_used: gptResult.model || 'gpt-4o',
+        status: controlAnalysis.status,
+        confidence_score: controlAnalysis.confidence_score,
+        compliance_percentage: controlAnalysis.compliance_percentage,
+        findings: controlAnalysis,
+        diff_data: diffData,
+        summary: controlAnalysis.summary,
+        recommendations: controlAnalysis.recommendations,
+        raw_response: {
+          usage: gptResult.usage,
+          finish_reason: gptResult.finish_reason,
+          model: gptResult.model,
+        },
+      };
+
+      const { data: saved, error: saveError } = await supabase
+        .from('analysis_results')
+        .insert(analysisRecord)
+        .select()
+        .single();
+
+      if (saveError) {
+        console.error(`⚠️ DB save failed for ${child.control_number}: ${saveError.message}`);
+      }
+
+      results.push({
+        analysis_id: saved?.id || null,
+        control_id: child.id,
+        control_number: child.control_number,
+        control_title: child.title,
+        status: controlAnalysis.status,
+        compliance_percentage: controlAnalysis.compliance_percentage,
+        confidence_score: controlAnalysis.confidence_score,
+        summary: controlAnalysis.summary,
+        evidence_count: parsedDocs.length,
+      });
+
+      console.log(`✅ ${child.control_number}: ${controlAnalysis.status} (${controlAnalysis.compliance_percentage}%)`);
+    }
+
+    // 12. Compute aggregate
+    const validResults = results.filter(r => r.status !== 'error');
+    const aggregate = computeGroupAggregate(validResults);
+
+    console.log(`🏁 Analyze-all complete: ${results.length} controls, aggregate: ${aggregate.overall_status} (${aggregate.average_compliance_percentage}%)`);
+
+    res.json({
+      success: true,
+      aggregate,
+      results,
+      parentControl: {
+        id: parentControl.id,
+        control_number: parentControl.control_number,
+        title: parentControl.title,
+      },
+      evidence_files: parsedDocs.map(d => ({
+        id: d.evidence.id,
+        name: d.evidence.file_name,
+      })),
+      overall: {
+        status: gptResult.analysis.overall_status || aggregate.overall_status,
+        compliance_percentage: gptResult.analysis.overall_compliance_percentage || aggregate.average_compliance_percentage,
+        summary: gptResult.analysis.overall_summary || '',
+      },
+      metadata: {
+        model: gptResult.model,
+        tokens_used: gptResult.usage,
+        analyzed_at: new Date().toISOString(),
+        documents_analyzed: parsedDocs.length,
+        controls_analyzed: childControls.length,
+      },
+    });
+  } catch (err) {
+    console.error('❌ Analyze-all error:', err.message);
+    res.status(500).json({
+      error: 'Analyze-all failed',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  } finally {
+    tempFiles.forEach(f => cleanupFile(f));
   }
 });
 
