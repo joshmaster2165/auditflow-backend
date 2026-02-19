@@ -873,10 +873,10 @@ router.get('/debug-controls/:controlId', async (req, res) => {
   try {
     const { controlId } = req.params;
 
-    // Fetch the specified control
+    // Fetch the specified control (use * to avoid guessing column names)
     const { data: control, error: controlError } = await supabase
       .from('controls')
-      .select('id, control_number, title, group, category, parent_control_number, level, sort_order, framework_id')
+      .select('*')
       .eq('id', controlId)
       .single();
 
@@ -887,19 +887,22 @@ router.get('/debug-controls/:controlId', async (req, res) => {
     // Fetch ALL controls in the same framework to understand the structure
     const { data: allControls, error: allError } = await supabase
       .from('controls')
-      .select('id, control_number, title, group, category, parent_control_number, level, sort_order')
+      .select('*')
       .eq('framework_id', control.framework_id)
       .order('sort_order', { ascending: true });
+
+    // Show all columns that exist on the first control to reveal schema
+    const sampleColumns = allControls?.[0] ? Object.keys(allControls[0]) : [];
 
     res.json({
       target_control: control,
       framework_id: control.framework_id,
       total_controls: allControls?.length || 0,
+      schema_columns: sampleColumns,
       all_controls: (allControls || []).map(c => ({
         id: c.id,
         control_number: c.control_number,
         title: c.title,
-        group: c.group,
         category: c.category,
         parent_control_number: c.parent_control_number,
         level: c.level,

@@ -463,29 +463,26 @@ async function findChildControls(parentControl, selectFields = '*, frameworks:fr
     return { childControls: treeChildren, matchStrategy: 'parent_control_number' };
   }
 
-  // --- Strategy B: group/category match ---
-  // Controls that share the same group value as the parent, or whose group matches
-  // the parent's control_number or title
-  const groupFilters = [
-    parentControl.group ? `group.eq.${parentControl.group}` : null,
-    `group.eq.${controlNumber}`,
-    `group.eq.${parentControl.title}`,
+  // --- Strategy B: category match ---
+  // Controls that share the same category as the parent's title or control_number
+  const categoryFilters = [
     parentControl.category ? `category.eq.${parentControl.category}` : null,
-    parentControl.category ? `group.eq.${parentControl.category}` : null,
+    `category.eq.${controlNumber}`,
+    `category.eq.${parentControl.title}`,
   ].filter(Boolean);
 
-  if (groupFilters.length > 0) {
-    const { data: groupChildren, error: groupError } = await supabase
+  if (categoryFilters.length > 0) {
+    const { data: catChildren, error: catError } = await supabase
       .from('controls')
       .select(selectFields)
       .eq('framework_id', frameworkId)
-      .or(groupFilters.join(','))
+      .or(categoryFilters.join(','))
       .neq('id', parentId)
       .order('sort_order', { ascending: true });
 
-    if (!groupError && groupChildren && groupChildren.length > 0) {
-      console.log(`🔗 Found ${groupChildren.length} children via group/category match`);
-      return { childControls: groupChildren, matchStrategy: 'group' };
+    if (!catError && catChildren && catChildren.length > 0) {
+      console.log(`🔗 Found ${catChildren.length} children via category match`);
+      return { childControls: catChildren, matchStrategy: 'category' };
     }
   }
 
