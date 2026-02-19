@@ -60,7 +60,6 @@ router.post('/evidence/:evidenceId', async (req, res) => {
 
     // 4. Get requirement text — prioritize frontend-provided context, fallback to DB join
     const dbControl = evidence.controls;
-    console.log(`🔎 DB join control: ${JSON.stringify(dbControl, null, 2)?.substring(0, 500)}`);
 
     // Merge: frontend body data takes priority over DB join
     let control = {
@@ -1158,8 +1157,6 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         error: 'No evidence files found. Upload evidence before validating.',
       });
     }
-
-    console.log(`📎 ${evidenceFiles.length} evidence file(s) attached to parent`);
 
     // 4. Download and parse all evidence (dedupe by file_path) — separate text and images
     const seenPaths = new Set();

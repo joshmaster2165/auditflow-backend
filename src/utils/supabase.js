@@ -96,7 +96,6 @@ function cleanupFile(filePath) {
   try {
     if (filePath && fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
-      console.log(`🧹 Cleaned up temp file: ${filePath}`);
     }
   } catch (err) {
     console.warn(`⚠️ Failed to clean up temp file: ${filePath}`, err.message);
