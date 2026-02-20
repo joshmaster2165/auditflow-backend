@@ -192,4 +192,4 @@ function createJobStore({
   return jobs;
 }
 
-module.exports = { buildAnalysisRecord, analyzeControlWithRetry, createJobStore };
+module.exports = { buildAnalysisRecord, analyzeControlWithRetry, createJobStore, RATE_LIMIT_RETRY_DELAY_MS };

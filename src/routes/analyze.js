@@ -8,7 +8,7 @@ const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
 const { analyzeEvidence, analyzeImageEvidence, analyzeImageEvidenceMultiControl, normalizeGptAnalysis, buildAnalyzeAllPrompt, SYSTEM_PROMPT } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
-const { createJobStore, buildAnalysisRecord } = require('../utils/analysisHelpers');
+const { createJobStore, buildAnalysisRecord, RATE_LIMIT_RETRY_DELAY_MS } = require('../utils/analysisHelpers');
 
 // ── Constants ──
 const MAX_COMBINED_TEXT_CHARS = 400000;
@@ -1148,27 +1148,42 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         const ev = parsed.evidence;
         let gptResult;
 
-        if (parsed.isImage) {
-          // ── IMAGE EVIDENCE: vision API with all controls (shared GPT client) ──
-          const textPrompt = buildAnalyzeAllPrompt(
-            '(Image evidence — see attached image)', controlsList, customInstructions, [ev.file_name]
-          );
-          const fullPrompt = textPrompt + `\n=== IMAGE EVIDENCE: ${ev.file_name} ===`;
-          gptResult = await analyzeImageEvidenceMultiControl(parsed.base64, parsed.mimeType, fullPrompt);
-        } else {
-          // ── TEXT EVIDENCE: one doc + all controls ──
-          const singleDocText = `\n\n=== DOCUMENT 1: ${ev.file_name} ===\n\n${parsed.text}`;
+        // Helper: call the right GPT function for this evidence type
+        const runGptCall = async () => {
+          if (parsed.isImage) {
+            const textPrompt = buildAnalyzeAllPrompt(
+              '(Image evidence — see attached image)', controlsList, customInstructions, [ev.file_name]
+            );
+            const fullPrompt = textPrompt + `\n=== IMAGE EVIDENCE: ${ev.file_name} ===`;
+            return analyzeImageEvidenceMultiControl(parsed.base64, parsed.mimeType, fullPrompt);
+          } else {
+            const singleDocText = `\n\n=== DOCUMENT 1: ${ev.file_name} ===\n\n${parsed.text}`;
 
-          // Token limit guard per document
-          if (singleDocText.length > MAX_COMBINED_TEXT_CHARS) {
-            console.warn(`⚠️ Evidence ${ev.file_name} too large (${singleDocText.length} chars) — skipping`);
-            return [];
+            if (singleDocText.length > MAX_COMBINED_TEXT_CHARS) {
+              console.warn(`⚠️ Evidence ${ev.file_name} too large (${singleDocText.length} chars) — skipping`);
+              return null;
+            }
+
+            const userPromptOverride = buildAnalyzeAllPrompt(singleDocText, controlsList, customInstructions, [ev.file_name]);
+            console.log(`🤖 Analyzing ${ev.file_name} against ${controlsToAnalyze.length} controls...`);
+            return analyzeEvidence(parsed.text, 'multiple controls', parentControl.title, customInstructions, { userPromptOverride });
           }
+        };
 
-          const userPromptOverride = buildAnalyzeAllPrompt(singleDocText, controlsList, customInstructions, [ev.file_name]);
-          console.log(`🤖 Analyzing ${ev.file_name} against ${controlsToAnalyze.length} controls...`);
-          gptResult = await analyzeEvidence(parsed.text, 'multiple controls', parentControl.title, customInstructions, { userPromptOverride });
+        // First attempt + rate-limit retry (once, 60s delay)
+        try {
+          gptResult = await runGptCall();
+        } catch (err) {
+          if (err.message?.includes('429') || err.message?.toLowerCase().includes('rate limit')) {
+            console.log(`⏳ Rate limited on ${ev.file_name}. Waiting 60s before retrying...`);
+            await new Promise(r => setTimeout(r, RATE_LIMIT_RETRY_DELAY_MS));
+            gptResult = await runGptCall(); // retry once — if this throws, it propagates
+          } else {
+            throw err;
+          }
         }
+
+        if (!gptResult) return []; // skipped (e.g. too large)
 
         // Accumulate token usage
         if (gptResult.usage) {
@@ -1297,9 +1312,10 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     });
   } catch (err) {
     console.error('❌ Analyze-all error:', err.message);
-    res.status(500).json({
+    const isRateLimit = err.message?.includes('rate limit') || err.message?.includes('429');
+    res.status(isRateLimit ? 429 : 500).json({
       error: 'Analyze-all failed',
-      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+      details: err.message,
     });
   } finally {
     tempFiles.forEach(f => cleanupFile(f));
