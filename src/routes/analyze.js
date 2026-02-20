@@ -5,10 +5,10 @@ const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/
 const fs = require('fs');
 const { parseDocument, parseDocumentForViewer, isImageType } = require('../services/documentParser');
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
-const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt, SYSTEM_PROMPT } = require('../services/gpt');
+const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, SYSTEM_PROMPT } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
-const { createJobStore, buildPerEvidenceBreakdown } = require('../utils/analysisHelpers');
+const { createJobStore } = require('../utils/analysisHelpers');
 
 // ── Constants ──
 const MAX_COMBINED_TEXT_CHARS = 400000;
@@ -448,36 +448,8 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       return res.status(400).json({ error: 'Evidence record not found for this analysis' });
     }
 
-    // 2. Resolve active evidence document
-    const requestedEvidenceId = req.query.evidenceId;
-    const sources = analysis.diff_data?.evidence_sources || [];
-    let activeEvidence = defaultEvidence;
-    let isAlternateEvidence = false;
-    // Multi-evidence analyses ALWAYS filter per-evidence — no combined view
-    const shouldFilterByEvidence = sources.length > 1;
-
-    if (requestedEvidenceId) {
-      const isValidSource = sources.some(s => s.id === requestedEvidenceId);
-      if (isValidSource && requestedEvidenceId !== defaultEvidence.id) {
-        // Different file from default — fetch its record
-        const { data: altEvidence, error: altError } = await supabase
-          .from('evidence')
-          .select('id, file_name, file_type, file_path')
-          .eq('id', requestedEvidenceId)
-          .single();
-
-        if (!altError && altEvidence && altEvidence.file_path) {
-          activeEvidence = altEvidence;
-          isAlternateEvidence = true;
-          console.log(`🔄 [Viewer] Switching to alternate evidence: ${altEvidence.file_name}`);
-        }
-      } else if (!isValidSource && sources.length > 0) {
-        console.warn(`⚠️ [Viewer] Requested evidenceId ${requestedEvidenceId} not in evidence_sources — using default`);
-      }
-      // If requestedEvidenceId === defaultEvidence.id, activeEvidence stays as default
-      // but shouldFilterByEvidence is still true for multi-evidence (no combined view)
-    }
-
+    // 2. Each analysis_id maps to exactly 1 evidence file (per-pair model, v2.0+)
+    const activeEvidence = defaultEvidence;
     const filePath = activeEvidence.file_path;
     if (!filePath) {
       return res.status(400).json({ error: 'Evidence file path not available' });
@@ -485,97 +457,19 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
 
     const mimeType = activeEvidence.file_type || 'text/plain';
 
-    // 3. Per-evidence filtering — runs BEFORE file-type branching so images get filtered too
-    //    For multi-evidence analyses, each tab shows only its own findings (no combined view)
-    let responseFindings = analysis.findings;
-    let responseStatus = analysis.status;
-    let responseCompliance = analysis.compliance_percentage;
-    let responseConfidence = analysis.confidence_score;
-    let responseSummary = analysis.summary;
-    let responseDiffData = {
+    // 3. Use analysis data directly — no per-evidence filtering needed
+    const responseFindings = analysis.findings;
+    const responseStatus = analysis.status;
+    const responseCompliance = analysis.compliance_percentage;
+    const responseConfidence = analysis.confidence_score;
+    const responseSummary = analysis.summary;
+    const responseDiffData = {
       requirement_coverage: analysis.diff_data?.requirement_coverage,
       statistics: analysis.diff_data?.statistics,
       side_by_side: analysis.diff_data?.side_by_side,
       recommendations: analysis.diff_data?.recommendations || [],
       critical_gaps: analysis.diff_data?.critical_gaps || [],
     };
-
-    if (shouldFilterByEvidence) {
-      const fullBreakdown = analysis.findings?.requirements_breakdown || [];
-      const perEvidence = analysis.findings?.per_evidence_breakdown;
-      let filteredRequirements;
-
-      // Direct lookup by evidence_id (new analyses) or fuzzy fallback (old analyses)
-      if (perEvidence && perEvidence[activeEvidence.id] && perEvidence[activeEvidence.id].length > 0) {
-        filteredRequirements = perEvidence[activeEvidence.id];
-        console.log(`📊 [Viewer] Direct lookup: ${filteredRequirements.length} findings for evidence ${activeEvidence.id} (${activeEvidence.file_name})`);
-      } else {
-        // Fuzzy match by filename for old analyses without per_evidence_breakdown
-        filteredRequirements = fullBreakdown.filter(item => {
-          const src = (item.evidence_source || '').toLowerCase();
-          if (!src) return false; // Skip findings with no evidence_source — empty string matches everything
-          const fileName = (activeEvidence.file_name || '').toLowerCase();
-          return src === fileName || fileName.includes(src) || src.includes(fileName.replace(/\.[^.]+$/, ''));
-        });
-        console.log(`📊 [Viewer] Fuzzy fallback: ${filteredRequirements.length} of ${fullBreakdown.length} findings for ${activeEvidence.file_name}`);
-      }
-
-      // If no per_evidence_breakdown AND fuzzy returned nothing, fall back to all findings
-      if (filteredRequirements.length === 0 && (!perEvidence || Object.keys(perEvidence).length === 0)) {
-        console.warn(`⚠️ [Viewer] No per_evidence_breakdown and fuzzy match returned 0 — falling back to all findings`);
-        filteredRequirements = fullBreakdown;
-      }
-
-      console.log(`📊 [Viewer] Evidence ${activeEvidence.id} (${activeEvidence.file_name}) → ${filteredRequirements.length} filtered findings`);
-
-      // Recompute status and stats from filtered findings
-      if (filteredRequirements.length > 0) {
-        const metCount = filteredRequirements.filter(f => f.status === 'met').length;
-        const partialCount = filteredRequirements.filter(f => f.status === 'partial').length;
-        const missingCount = filteredRequirements.filter(f => f.status === 'missing').length;
-
-        responseCompliance = Math.round(((metCount + partialCount * 0.5) / filteredRequirements.length) * 100);
-        responseStatus = missingCount > 0 ? 'non_compliant'
-          : partialCount > 0 ? 'partial'
-          : 'compliant';
-
-        const confidenceValues = filteredRequirements.map(f => parseFloat(f.confidence || 0.5));
-        responseConfidence = parseFloat((confidenceValues.reduce((a, b) => a + b, 0) / confidenceValues.length).toFixed(2));
-
-        responseSummary = `Findings from ${activeEvidence.file_name}: ${metCount} met, ${partialCount} partial, ${missingCount} missing out of ${filteredRequirements.length} requirements.`;
-      }
-
-      // Scope findings to active evidence only — don't leak combined per_evidence_breakdown
-      const filteredRecommendations = analysis.findings?.recommendations || [];
-      const filteredCriticalGaps = analysis.findings?.critical_gaps || [];
-      responseFindings = {
-        requirements_breakdown: filteredRequirements,
-        recommendations: filteredRecommendations,
-        critical_gaps: filteredCriticalGaps,
-        per_evidence_breakdown: { [activeEvidence.id]: filteredRequirements },
-      };
-
-      // Always rebuild diff_data from filtered findings (even if 0 — generateDiff handles empty gracefully)
-      const rebuiltDiff = generateDiff(
-        {
-          status: responseStatus,
-          compliance_percentage: responseCompliance,
-          confidence_score: responseConfidence,
-          requirements_breakdown: filteredRequirements,
-          recommendations: filteredRecommendations,
-          critical_gaps: filteredCriticalGaps,
-        },
-        analysis.diff_data?.original_requirement || ''
-      );
-      responseDiffData = {
-        requirement_coverage: rebuiltDiff.requirement_coverage,
-        statistics: rebuiltDiff.statistics,
-        side_by_side: rebuiltDiff.side_by_side,
-        recommendations: rebuiltDiff.recommendations,
-        critical_gaps: rebuiltDiff.critical_gaps,
-      };
-      console.log(`🔄 [Viewer] Rebuilt diff_data for ${activeEvidence.file_name}: ${rebuiltDiff.statistics.total_requirements} requirements, ${rebuiltDiff.statistics.met_count} met`);
-    }
 
     // 4. IMAGE VIEWER: return signed URL + extracted text, no highlights
     if (isImageType(mimeType)) {
@@ -602,7 +496,6 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
           findings: responseFindings,
           diff_data: responseDiffData,
         },
-        evidenceSources: sources.length > 0 ? sources : null,
         evidence: {
           id: activeEvidence.id,
           fileName: activeEvidence.file_name,
@@ -616,22 +509,16 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       });
     }
 
-    // 5. Check for cached viewer data in diff_data (only for default evidence, non-alternate)
-    let documentText = null;
-    let documentHtml = null;
-    let highlightRanges = null;
+    // 5. Check for cached viewer data in diff_data
+    let documentText = analysis.diff_data?.viewer_document_text || null;
+    let documentHtml = analysis.diff_data?.viewer_document_html || null;
+    let highlightRanges = analysis.diff_data?.viewer_highlight_ranges || null;
 
-    if (!isAlternateEvidence) {
-      documentText = analysis.diff_data?.viewer_document_text || null;
-      documentHtml = analysis.diff_data?.viewer_document_html || null;
-      highlightRanges = analysis.diff_data?.viewer_highlight_ranges || null;
-    }
-
-    const hasValidCache = !isAlternateEvidence && !shouldFilterByEvidence && documentText && highlightRanges && highlightRanges.length > 0;
+    const hasValidCache = documentText && highlightRanges && highlightRanges.length > 0;
 
     // 6. If not cached, download and parse the document
     if (!hasValidCache) {
-      console.log(`📄 [Viewer] ${isAlternateEvidence ? 'Alternate' : 'First'} view for analysis ${analysisId} — downloading ${activeEvidence.file_name}`);
+      console.log(`📄 [Viewer] Loading analysis ${analysisId} — downloading ${activeEvidence.file_name}`);
 
       tempFilePath = await downloadFile(filePath);
       const parsed = await parseDocumentForViewer(tempFilePath, mimeType);
@@ -639,36 +526,30 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       documentText = parsed.text;
       documentHtml = parsed.html;
 
-      // Build highlight ranges — use filtered findings for multi-evidence
-      const highlightFindings = shouldFilterByEvidence
-        ? (responseFindings?.requirements_breakdown || [])
-        : (analysis.findings?.requirements_breakdown || []);
-
+      const highlightFindings = analysis.findings?.requirements_breakdown || [];
       highlightRanges = verifyAndBuildHighlightRanges(documentText, highlightFindings);
 
       console.log(`🎯 [Viewer] ${highlightRanges.length} highlight ranges matched (${highlightRanges.filter(r => r.matchQuality === 'exact').length} exact)`);
 
-      // Cache results back to diff_data (only for default evidence, non-blocking)
-      if (!isAlternateEvidence) {
-        supabase
-          .from('analysis_results')
-          .update({
-            diff_data: {
-              ...analysis.diff_data,
-              viewer_document_text: documentText,
-              viewer_document_html: documentHtml,
-              viewer_highlight_ranges: highlightRanges,
-            },
-          })
-          .eq('id', analysisId)
-          .then(({ error: updateError }) => {
-            if (updateError) {
-              console.warn(`⚠️ [Viewer] Failed to cache viewer data: ${updateError.message}`);
-            } else {
-              console.log(`💾 [Viewer] Cached viewer data for analysis ${analysisId}`);
-            }
-          });
-      }
+      // Cache results back to diff_data (non-blocking)
+      supabase
+        .from('analysis_results')
+        .update({
+          diff_data: {
+            ...analysis.diff_data,
+            viewer_document_text: documentText,
+            viewer_document_html: documentHtml,
+            viewer_highlight_ranges: highlightRanges,
+          },
+        })
+        .eq('id', analysisId)
+        .then(({ error: updateError }) => {
+          if (updateError) {
+            console.warn(`⚠️ [Viewer] Failed to cache viewer data: ${updateError.message}`);
+          } else {
+            console.log(`💾 [Viewer] Cached viewer data for analysis ${analysisId}`);
+          }
+        });
     }
 
     // 7. Generate signed URL for PDF viewing
@@ -685,7 +566,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       fileType = 'docx';
     }
 
-    // 9. Return viewer response — analysis is already filtered per-evidence above
+    // 9. Return viewer response
     res.json({
       success: true,
       viewer: {
@@ -706,7 +587,6 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
         findings: responseFindings,
         diff_data: responseDiffData,
       },
-      evidenceSources: sources.length > 0 ? sources : null,
       evidence: {
         id: activeEvidence.id,
         fileName: activeEvidence.file_name,
@@ -1219,187 +1099,187 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       });
     }
 
-    // 5. Concatenate text docs with separators
-    const combinedText = parsedDocs.map((d, i) =>
-      `\n\n=== DOCUMENT ${i + 1}: ${d.evidence.file_name} ===\n\n${d.text}`
-    ).join('');
-
-    // 6. Token limit guard
-    if (combinedText.length > MAX_COMBINED_TEXT_CHARS) {
-      return res.status(400).json({
-        error: 'Combined evidence is too large for a single analysis',
-        combined_length: combinedText.length,
-        hint: 'Try reducing the number or size of evidence files',
-      });
-    }
-
-    // 7. Build controls list with enriched requirement text
+    // 5. Build controls list with enriched requirement text
     const controlsList = controlsToAnalyze.map(c => ({
       control_number: c.control_number || '',
       title: c.title || 'Unnamed Control',
       requirementText: buildRequirementText(c, c.frameworks),
     }));
 
-    // 8. Fetch custom instructions
+    // 6. Fetch custom instructions
     const projectId = evidenceFiles[0].project_id || null;
     const customInstructions = await fetchCustomInstructions(projectId);
 
-    // 9. Build prompt and call GPT — branch for mixed content
-    const documentNames = [...parsedDocs.map(d => d.evidence.file_name), ...parsedImages.map(d => d.evidence.file_name)];
-    let gptResult;
-
-    if (parsedImages.length > 0) {
-      // ── MIXED CONTENT: text docs + images → vision API ──
-      const textPrompt = buildAnalyzeAllPrompt(
-        combinedText || '(No text documents — all evidence is image-based)',
-        controlsList, customInstructions, documentNames
-      );
-
-      const contentParts = [{ type: 'text', text: textPrompt }];
-      for (const img of parsedImages) {
-        contentParts.push({ type: 'text', text: `\n=== IMAGE EVIDENCE: ${img.evidence.file_name} ===` });
-        contentParts.push({
-          type: 'image_url',
-          image_url: { url: `data:${img.mimeType};base64,${img.base64}`, detail: 'high' },
-        });
-      }
-
-      console.log(`🤖 Sending ${totalEvidenceCount} evidence (${parsedDocs.length} text + ${parsedImages.length} images) + ${controlsToAnalyze.length} controls to GPT-4o vision...`);
-
-      const OpenAI = require('openai');
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-      const response = await openai.chat.completions.create({
-        model: 'gpt-4o',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: contentParts },
-        ],
-        temperature: 0.2,
-        max_tokens: 16384,
-        response_format: { type: 'json_object' },
-      });
-
-      const choice = response.choices[0];
-      let analysis;
-      try {
-        analysis = JSON.parse(choice.message.content);
-      } catch (e) {
-        throw new Error('GPT returned invalid JSON for mixed analyze-all');
-      }
-
-      // Minimal normalization
-      analysis.status = analysis.overall_status || analysis.status || 'non_compliant';
-      analysis.controls = Array.isArray(analysis.controls) ? analysis.controls : [];
-      gptResult = { analysis, model: response.model, usage: response.usage, finish_reason: choice.finish_reason };
-    } else {
-      // ── TEXT-ONLY: existing path ──
-      const userPromptOverride = buildAnalyzeAllPrompt(combinedText, controlsList, customInstructions, documentNames);
-      console.log(`🤖 Sending ${parsedDocs.length} docs + ${controlsToAnalyze.length} controls to GPT...`);
-      gptResult = await analyzeEvidence(combinedText, 'multiple controls', parentControl.title, customInstructions, { userPromptOverride });
-    }
-
-    // 10. Parse per-control results from GPT response
-    const gptControls = gptResult.analysis.controls || [];
-    const allEvidenceForSources = [
-      ...parsedDocs.map(d => d.evidence),
-      ...parsedImages.map(d => d.evidence),
+    // 7. Process each evidence file separately — one GPT call per evidence × all controls
+    //    This produces M×N results (one per evidence-control pair)
+    const allParsedEvidence = [
+      ...parsedDocs.map(d => ({ evidence: d.evidence, text: d.text, isImage: false })),
+      ...parsedImages.map(d => ({ evidence: d.evidence, base64: d.base64, mimeType: d.mimeType, isImage: true })),
     ];
-    const evidenceSources = allEvidenceForSources.map(ev => ({
-      id: ev.id,
-      fileName: ev.file_name,
-      fileType: ev.file_type,
-      filePath: ev.file_path,
-    }));
 
-    // 11. Save one analysis_results per control
     const results = [];
-    for (const child of controlsToAnalyze) {
-      // Match GPT result by control_number
-      const gptCtrl = gptControls.find(g =>
-        g.control_number === child.control_number ||
-        g.control_number === (child.control_number || '').trim()
-      ) || null;
+    let totalUsage = null;
+    const CONCURRENCY = 3;
 
-      if (!gptCtrl) {
-        console.warn(`⚠️ GPT did not return result for control ${child.control_number} — skipping DB save`);
-        results.push({
-          analysis_id: null,
-          control_id: child.id,
-          control_number: child.control_number,
-          control_title: child.title,
-          status: 'error',
-          error: 'GPT did not return a result for this control',
-          compliance_percentage: null,
-          confidence_score: null,
-          summary: null,
-        });
-        continue;
-      }
+    // Process evidence files in parallel batches of CONCURRENCY
+    for (let batchStart = 0; batchStart < allParsedEvidence.length; batchStart += CONCURRENCY) {
+      const batch = allParsedEvidence.slice(batchStart, batchStart + CONCURRENCY);
 
-      // Normalize the per-control analysis to match standard format
-      const controlAnalysis = normalizeGptAnalysis({ ...gptCtrl });
+      const batchPromises = batch.map(async (parsed) => {
+        const ev = parsed.evidence;
+        let gptResult;
 
-      // Build per-evidence breakdown for reliable tab switching
-      controlAnalysis.per_evidence_breakdown = buildPerEvidenceBreakdown(
-        controlAnalysis.requirements_breakdown || [], allEvidenceForSources
-      );
+        if (parsed.isImage) {
+          // ── IMAGE EVIDENCE: vision API with all controls ──
+          const textPrompt = buildAnalyzeAllPrompt(
+            '(Image evidence — see attached image)', controlsList, customInstructions, [ev.file_name]
+          );
+          const contentParts = [
+            { type: 'text', text: textPrompt },
+            { type: 'text', text: `\n=== IMAGE EVIDENCE: ${ev.file_name} ===` },
+            { type: 'image_url', image_url: { url: `data:${parsed.mimeType};base64,${parsed.base64}`, detail: 'high' } },
+          ];
 
-      const requirementText = buildRequirementText(child, child.frameworks);
-      const diffData = generateDiff(controlAnalysis, requirementText);
-      diffData.evidence_sources = evidenceSources;
+          const OpenAI = require('openai');
+          const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+          const response = await openai.chat.completions.create({
+            model: 'gpt-4o',
+            messages: [
+              { role: 'system', content: SYSTEM_PROMPT },
+              { role: 'user', content: contentParts },
+            ],
+            temperature: 0.2,
+            max_tokens: 16384,
+            response_format: { type: 'json_object' },
+          });
 
-      const analysisRecord = {
-        evidence_id: allEvidenceForSources[0].id,
-        control_id: child.id,
-        project_id: projectId,
-        analyzed_at: new Date().toISOString(),
-        analysis_version: 'v1.0-all',
-        model_used: gptResult.model || 'gpt-4o',
-        status: controlAnalysis.status,
-        confidence_score: controlAnalysis.confidence_score,
-        compliance_percentage: controlAnalysis.compliance_percentage,
-        findings: controlAnalysis,
-        diff_data: diffData,
-        summary: controlAnalysis.summary,
-        recommendations: controlAnalysis.recommendations,
-        raw_response: {
-          usage: gptResult.usage,
-          finish_reason: gptResult.finish_reason,
-          model: gptResult.model,
-        },
-      };
+          const choice = response.choices[0];
+          let analysis;
+          try { analysis = JSON.parse(choice.message.content); } catch (e) {
+            throw new Error(`GPT returned invalid JSON for image evidence: ${ev.file_name}`);
+          }
+          analysis.status = analysis.overall_status || analysis.status || 'non_compliant';
+          analysis.controls = Array.isArray(analysis.controls) ? analysis.controls : [];
+          gptResult = { analysis, model: response.model, usage: response.usage, finish_reason: choice.finish_reason };
+        } else {
+          // ── TEXT EVIDENCE: one doc + all controls ──
+          const singleDocText = `\n\n=== DOCUMENT 1: ${ev.file_name} ===\n\n${parsed.text}`;
 
-      const { data: saved, error: saveError } = await supabase
-        .from('analysis_results')
-        .insert(analysisRecord)
-        .select()
-        .single();
+          // Token limit guard per document
+          if (singleDocText.length > MAX_COMBINED_TEXT_CHARS) {
+            console.warn(`⚠️ Evidence ${ev.file_name} too large (${singleDocText.length} chars) — skipping`);
+            return [];
+          }
 
-      if (saveError) {
-        console.error(`⚠️ DB save failed for ${child.control_number}: ${saveError.message}`);
-      }
+          const userPromptOverride = buildAnalyzeAllPrompt(singleDocText, controlsList, customInstructions, [ev.file_name]);
+          console.log(`🤖 Analyzing ${ev.file_name} against ${controlsToAnalyze.length} controls...`);
+          gptResult = await analyzeEvidence(parsed.text, 'multiple controls', parentControl.title, customInstructions, { userPromptOverride });
+        }
 
-      results.push({
-        analysis_id: saved?.id || null,
-        control_id: child.id,
-        control_number: child.control_number,
-        control_title: child.title,
-        status: controlAnalysis.status,
-        compliance_percentage: controlAnalysis.compliance_percentage,
-        confidence_score: controlAnalysis.confidence_score,
-        summary: controlAnalysis.summary,
-        evidence_count: totalEvidenceCount,
+        // Accumulate token usage
+        if (gptResult.usage) {
+          if (!totalUsage) totalUsage = { ...gptResult.usage };
+          else {
+            totalUsage.prompt_tokens = (totalUsage.prompt_tokens || 0) + (gptResult.usage.prompt_tokens || 0);
+            totalUsage.completion_tokens = (totalUsage.completion_tokens || 0) + (gptResult.usage.completion_tokens || 0);
+            totalUsage.total_tokens = (totalUsage.total_tokens || 0) + (gptResult.usage.total_tokens || 0);
+          }
+        }
+
+        // Parse per-control results and save one row per evidence×control pair
+        const gptControls = gptResult.analysis.controls || [];
+        const pairResults = [];
+
+        for (const child of controlsToAnalyze) {
+          const gptCtrl = gptControls.find(g =>
+            g.control_number === child.control_number ||
+            g.control_number === (child.control_number || '').trim()
+          ) || null;
+
+          if (!gptCtrl) {
+            console.warn(`⚠️ GPT did not return result for control ${child.control_number} (evidence: ${ev.file_name}) — skipping`);
+            pairResults.push({
+              analysis_id: null,
+              control_id: child.id,
+              evidence_id: ev.id,
+              evidence_name: ev.file_name,
+              control_number: child.control_number,
+              control_title: child.title,
+              status: 'error',
+              error: 'GPT did not return a result for this control',
+              compliance_percentage: null,
+              confidence_score: null,
+              summary: null,
+            });
+            continue;
+          }
+
+          const controlAnalysis = normalizeGptAnalysis({ ...gptCtrl });
+          const requirementText = buildRequirementText(child, child.frameworks);
+          const diffData = generateDiff(controlAnalysis, requirementText);
+
+          const analysisRecord = {
+            evidence_id: ev.id,
+            control_id: child.id,
+            project_id: projectId,
+            analyzed_at: new Date().toISOString(),
+            analysis_version: 'v2.0-pair',
+            model_used: gptResult.model || 'gpt-4o',
+            status: controlAnalysis.status,
+            confidence_score: controlAnalysis.confidence_score,
+            compliance_percentage: controlAnalysis.compliance_percentage,
+            findings: controlAnalysis,
+            diff_data: diffData,
+            summary: controlAnalysis.summary,
+            recommendations: controlAnalysis.recommendations,
+            raw_response: {
+              usage: gptResult.usage,
+              finish_reason: gptResult.finish_reason,
+              model: gptResult.model,
+            },
+          };
+
+          const { data: saved, error: saveError } = await supabase
+            .from('analysis_results')
+            .insert(analysisRecord)
+            .select()
+            .single();
+
+          if (saveError) {
+            console.error(`⚠️ DB save failed for ${child.control_number} × ${ev.file_name}: ${saveError.message}`);
+          }
+
+          pairResults.push({
+            analysis_id: saved?.id || null,
+            control_id: child.id,
+            evidence_id: ev.id,
+            evidence_name: ev.file_name,
+            control_number: child.control_number,
+            control_title: child.title,
+            status: controlAnalysis.status,
+            compliance_percentage: controlAnalysis.compliance_percentage,
+            confidence_score: controlAnalysis.confidence_score,
+            summary: controlAnalysis.summary,
+          });
+
+          console.log(`✅ ${child.control_number} × ${ev.file_name}: ${controlAnalysis.status} (${controlAnalysis.compliance_percentage}%)`);
+        }
+
+        return pairResults;
       });
 
-      console.log(`✅ ${child.control_number}: ${controlAnalysis.status} (${controlAnalysis.compliance_percentage}%)`);
+      const batchResults = await Promise.all(batchPromises);
+      for (const pairResults of batchResults) {
+        results.push(...pairResults);
+      }
     }
 
-    // 12. Compute aggregate
+    // 8. Compute aggregate (use latest per control for backward compat)
     const validResults = results.filter(r => r.status !== 'error');
     const aggregate = computeGroupAggregate(validResults);
+    const pairsAnalyzed = results.length;
 
-    console.log(`🏁 Analyze-all complete: ${results.length} controls, aggregate: ${aggregate.overall_status} (${aggregate.average_compliance_percentage}%)`);
+    console.log(`🏁 Analyze-all complete: ${pairsAnalyzed} pairs (${allParsedEvidence.length} evidence × ${controlsToAnalyze.length} controls), aggregate: ${aggregate.overall_status} (${aggregate.average_compliance_percentage}%)`);
 
     res.json({
       success: true,
@@ -1410,21 +1290,22 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         control_number: parentControl.control_number,
         title: parentControl.title,
       },
-      evidence_files: allEvidenceForSources.map(ev => ({
-        id: ev.id,
-        name: ev.file_name,
+      evidence_files: allParsedEvidence.map(p => ({
+        id: p.evidence.id,
+        name: p.evidence.file_name,
       })),
       overall: {
-        status: gptResult.analysis.overall_status || aggregate.overall_status,
-        compliance_percentage: gptResult.analysis.overall_compliance_percentage || aggregate.average_compliance_percentage,
-        summary: gptResult.analysis.overall_summary || '',
+        status: aggregate.overall_status,
+        compliance_percentage: aggregate.average_compliance_percentage,
+        summary: '',
       },
       metadata: {
-        model: gptResult.model,
-        tokens_used: gptResult.usage,
+        model: 'gpt-4o',
+        tokens_used: totalUsage,
         analyzed_at: new Date().toISOString(),
-        documents_analyzed: totalEvidenceCount,
+        documents_analyzed: allParsedEvidence.length,
         controls_analyzed: controlsToAnalyze.length,
+        pairs_analyzed: pairsAnalyzed,
       },
     });
   } catch (err) {
@@ -1438,276 +1319,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
   }
 });
 
-// ══════════════════════════════════════════════════════════════════════════════
-// MULTI-EVIDENCE CONSOLIDATED ANALYSIS
-// Analyzes ALL evidence files attached to a control in one GPT call
-// ══════════════════════════════════════════════════════════════════════════════
-
-// POST /api/analyze/multi-evidence/:controlId — Consolidated multi-evidence analysis
-router.post('/multi-evidence/:controlId', async (req, res) => {
-  const tempFiles = [];
-
-  try {
-    const { controlId } = req.params;
-    console.log(`\n🔍 Starting MULTI-EVIDENCE analysis for control: ${controlId}`);
-
-    // 1. Fetch all evidence files linked to this control
-    const { data: evidenceFiles, error: evidenceError } = await supabase
-      .from('evidence')
-      .select('*')
-      .eq('control_id', controlId)
-      .order('uploaded_at', { ascending: true });
-
-    if (evidenceError) {
-      return res.status(500).json({ error: 'Failed to fetch evidence files', details: evidenceError.message });
-    }
-
-    if (!evidenceFiles || evidenceFiles.length === 0) {
-      return res.status(404).json({ error: 'No evidence files found for this control' });
-    }
-
-    console.log(`📎 Found ${evidenceFiles.length} evidence file(s) for control ${controlId}`);
-
-    // 2. Fetch control with framework
-    const { data: control, error: controlError } = await supabase
-      .from('controls')
-      .select('*, frameworks:framework_id (*)')
-      .eq('id', controlId)
-      .single();
-
-    if (controlError || !control) {
-      return res.status(404).json({ error: 'Control not found', details: controlError?.message });
-    }
-
-    const controlName = control.title || 'Unknown Control';
-    const requirementText = buildRequirementText(control, control.frameworks);
-
-    console.log(`📐 Control: ${controlName} (${control.control_number || ''})`);
-
-    // 3. Download and parse ALL documents in parallel — separate text and image evidence
-    const parsedTextDocs = [];
-    const parsedImageDocs = [];
-
-    await Promise.all(evidenceFiles.map(async (ev) => {
-      const filePath = ev.file_path;
-      if (!filePath) {
-        console.warn(`⚠️ Evidence ${ev.id} (${ev.file_name}) has no file path — skipping`);
-        return;
-      }
-
-      try {
-        const tempPath = await downloadFile(filePath);
-        tempFiles.push(tempPath);
-        const mimeType = ev.file_type || 'text/plain';
-
-        if (isImageType(mimeType)) {
-          // Image evidence — read as base64
-          const imageBase64 = fs.readFileSync(tempPath).toString('base64');
-          parsedImageDocs.push({ evidence: ev, base64: imageBase64, mimeType });
-          console.log(`🖼️ Image evidence: ${ev.file_name} (${Math.round(imageBase64.length / 1024)}KB base64)`);
-        } else {
-          // Text evidence — parse normally
-          const text = await parseDocument(tempPath, mimeType);
-          parsedTextDocs.push({ evidence: ev, text });
-        }
-      } catch (parseErr) {
-        console.error(`❌ Failed to parse ${ev.file_name}: ${parseErr.message}`);
-      }
-    }));
-
-    const totalDocs = parsedTextDocs.length + parsedImageDocs.length;
-    if (totalDocs === 0) {
-      return res.status(400).json({ error: 'Could not parse any evidence files' });
-    }
-
-    // Image count guard
-    if (parsedImageDocs.length > MAX_IMAGE_FILES) {
-      return res.status(400).json({
-        error: `Too many image files (${parsedImageDocs.length}). Maximum ${MAX_IMAGE_FILES} images per request.`,
-      });
-    }
-
-    console.log(`📄 Successfully parsed ${totalDocs} evidence files (${parsedTextDocs.length} text, ${parsedImageDocs.length} images)`);
-
-    // 4. Concatenate text documents with clear separators
-    const combinedText = parsedTextDocs.map((d, i) =>
-      `\n\n=== DOCUMENT ${i + 1}: ${d.evidence.file_name} ===\n\n${d.text}`
-    ).join('');
-
-    // 5. Token limit guard (~100K tokens ≈ 400K chars) for text portion
-    if (combinedText.length > MAX_COMBINED_TEXT_CHARS) {
-      return res.status(400).json({
-        error: 'Combined document text is too large for a single analysis',
-        combined_length: combinedText.length,
-        max_length: MAX_COMBINED_TEXT_CHARS,
-        hint: 'Try reducing the number of evidence files or splitting large documents',
-      });
-    }
-
-    // 6. Fetch custom instructions
-    const customInstructions = await fetchCustomInstructions(evidenceFiles[0].project_id);
-
-    // 7. Build prompt and call GPT — branch for mixed content (text + images)
-    const allDocNames = [...parsedTextDocs.map(d => d.evidence.file_name), ...parsedImageDocs.map(d => d.evidence.file_name)];
-    let gptResult;
-
-    if (parsedImageDocs.length > 0) {
-      // ── MIXED CONTENT: text docs + image docs → use vision API content array ──
-      const textPrompt = buildMultiEvidenceUserPrompt(
-        combinedText || '(No text documents provided — all evidence is image-based)',
-        requirementText, controlName, customInstructions, allDocNames
-      );
-
-      // Build content array: text prompt + image parts
-      const contentParts = [{ type: 'text', text: textPrompt }];
-      for (const img of parsedImageDocs) {
-        contentParts.push({ type: 'text', text: `\n=== IMAGE EVIDENCE: ${img.evidence.file_name} ===` });
-        contentParts.push({
-          type: 'image_url',
-          image_url: { url: `data:${img.mimeType};base64,${img.base64}`, detail: 'high' },
-        });
-      }
-
-      console.log(`🤖 Sending ${totalDocs} docs (${parsedTextDocs.length} text + ${parsedImageDocs.length} images) to GPT-4o vision...`);
-
-      // Call GPT directly with content array (vision API format)
-      const OpenAI = require('openai');
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-      const response = await openai.chat.completions.create({
-        model: 'gpt-4o',
-        messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: contentParts },
-        ],
-        temperature: 0.2,
-        max_tokens: 16384,
-        response_format: { type: 'json_object' },
-      });
-
-      const choice = response.choices[0];
-      let analysis;
-      try {
-        analysis = JSON.parse(choice.message.content);
-      } catch (e) {
-        throw new Error('GPT returned invalid JSON for mixed content analysis');
-      }
-
-      // Normalize
-      normalizeGptAnalysis(analysis);
-
-      gptResult = { analysis, model: response.model, usage: response.usage, finish_reason: choice.finish_reason };
-    } else {
-      // ── TEXT-ONLY: existing path ──
-      const userPromptOverride = buildMultiEvidenceUserPrompt(
-        combinedText, requirementText, controlName, customInstructions, allDocNames
-      );
-      console.log(`🤖 Sending ${parsedTextDocs.length} documents (${combinedText.length} chars combined) to GPT for consolidated analysis...`);
-      gptResult = await analyzeEvidence(combinedText, requirementText, controlName, customInstructions, { userPromptOverride });
-    }
-
-    // 8. Generate diff visualization
-    const diffData = generateDiff(gptResult.analysis, requirementText);
-
-    // Combine all evidence sources (text + image)
-    const allEvidence = [
-      ...parsedTextDocs.map(d => d.evidence),
-      ...parsedImageDocs.map(d => d.evidence),
-    ];
-
-    // Add evidence_sources to diff_data for multi-doc viewer
-    diffData.evidence_sources = allEvidence.map(ev => ({
-      id: ev.id,
-      fileName: ev.file_name,
-      fileType: ev.file_type,
-      filePath: ev.file_path,
-    }));
-
-    // Store extracted text from images if any
-    if (parsedImageDocs.length > 0) {
-      diffData.has_images = true;
-    }
-
-    // 9. Build per-evidence breakdown for reliable tab switching in the viewer
-    gptResult.analysis.per_evidence_breakdown = buildPerEvidenceBreakdown(
-      gptResult.analysis.requirements_breakdown || [], allEvidence
-    );
-
-    // 10. Save ONE consolidated analysis_results record
-    const firstEvidence = parsedTextDocs[0]?.evidence || parsedImageDocs[0]?.evidence;
-    const analysisRecord = {
-      evidence_id: firstEvidence.id, // FK constraint: use first evidence
-      control_id: controlId,
-      project_id: evidenceFiles[0].project_id || null,
-      analyzed_at: new Date().toISOString(),
-      analysis_version: 'v1.0-multi',
-      model_used: gptResult.model || 'gpt-4o',
-      status: gptResult.analysis.status,
-      confidence_score: gptResult.analysis.confidence_score,
-      compliance_percentage: gptResult.analysis.compliance_percentage,
-      findings: gptResult.analysis,
-      diff_data: diffData,
-      summary: gptResult.analysis.summary,
-      recommendations: gptResult.analysis.recommendations || [],
-      raw_response: {
-        usage: gptResult.usage,
-        finish_reason: gptResult.finish_reason,
-        model: gptResult.model,
-      },
-    };
-
-    const { data: savedAnalysis, error: saveError } = await supabase
-      .from('analysis_results')
-      .insert(analysisRecord)
-      .select()
-      .single();
-
-    if (saveError) {
-      console.error('❌ Failed to save multi-evidence analysis:', saveError.message);
-      return res.status(200).json({
-        success: true,
-        warning: 'Analysis completed but failed to save to database',
-        analysis: gptResult.analysis,
-        diff_data: diffData,
-      });
-    }
-
-    console.log(`✅ Multi-evidence analysis saved: ${savedAnalysis.id} (${totalDocs} docs consolidated)`);
-
-    // 10. Return consolidated result
-    res.json({
-      success: true,
-      analysis_id: savedAnalysis.id,
-      analysis_version: 'v1.0-multi',
-      analysis: gptResult.analysis,
-      diff_data: diffData,
-      control: {
-        id: control.id,
-        name: controlName,
-        control_number: control.control_number,
-        framework: control.frameworks?.name || null,
-      },
-      evidence_files: allEvidence.map(ev => ({
-        id: ev.id,
-        name: ev.file_name,
-      })),
-      metadata: {
-        model: gptResult.model,
-        tokens_used: gptResult.usage,
-        analyzed_at: savedAnalysis.analyzed_at,
-        documents_analyzed: totalDocs,
-      },
-    });
-  } catch (err) {
-    console.error('❌ Multi-evidence analysis error:', err.message);
-    res.status(500).json({
-      error: 'Multi-evidence analysis failed',
-      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
-    });
-  } finally {
-    // Clean up ALL temp files
-    tempFiles.forEach(f => cleanupFile(f));
-  }
-});
+// NOTE: POST /multi-evidence/:controlId was removed — use analyze-all with controlIds: [singleId] instead
 
 module.exports = router;
+
