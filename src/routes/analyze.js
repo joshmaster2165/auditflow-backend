@@ -5,7 +5,7 @@ const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/
 const fs = require('fs');
 const { parseDocument, parseDocumentForViewer, isImageType } = require('../services/documentParser');
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
-const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt } = require('../services/gpt');
+const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt, SYSTEM_PROMPT } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore, buildPerEvidenceBreakdown } = require('../utils/analysisHelpers');
@@ -1272,7 +1272,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       const response = await openai.chat.completions.create({
         model: 'gpt-4o',
         messages: [
-          { role: 'system', content: `You are an expert compliance auditor. Analyze the provided evidence (documents and images) against multiple compliance controls. For images, extract all readable text and analyze visual content. You must respond with valid JSON only.` },
+          { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: contentParts },
         ],
         temperature: 0.2,
@@ -1577,7 +1577,7 @@ router.post('/multi-evidence/:controlId', async (req, res) => {
       const response = await openai.chat.completions.create({
         model: 'gpt-4o',
         messages: [
-          { role: 'system', content: `You are an expert compliance auditor. You are analyzing a mix of text documents and images as compliance evidence. For images, first extract all readable text (OCR), then analyze the visual content. ${customInstructions ? `Custom instructions: ${customInstructions}` : ''}` },
+          { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: contentParts },
         ],
         temperature: 0.2,

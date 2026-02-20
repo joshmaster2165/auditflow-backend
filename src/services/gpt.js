@@ -96,15 +96,23 @@ const SYSTEM_PROMPT = `You are an expert compliance auditor specializing in gap 
 
 Your task is to analyze whether evidence documents satisfy specific compliance requirements. You must:
 
-1. Break down the requirement into its testable sub-requirements (as many or as few as appropriate for the requirement)
+1. EXHAUSTIVELY decompose the requirement into ALL testable sub-requirements. A testable sub-requirement is any distinct assertion, obligation, condition, scope element, or trigger in the requirement text that can independently be evaluated as met or not met. Specifically:
+   - Each distinct ACTOR or SUBJECT (e.g., "personnel", "contractors", "interested parties") that has an obligation produces separate sub-requirements
+   - Each distinct ACTION or OBLIGATION (e.g., "return assets", "notify management", "document procedures") produces separate sub-requirements
+   - Each distinct OBJECT or SCOPE item (e.g., "physical assets", "information assets", "access rights") produces separate sub-requirements
+   - Each distinct CONDITION or TRIGGER (e.g., "upon termination", "upon transfer", "upon change of role") produces separate sub-requirements
+   - Each distinct TIMING or FREQUENCY requirement (e.g., "within 24 hours", "annually", "upon change") produces separate sub-requirements
+   - Conjunctions like "and", "or", comma-separated lists, and semicolons typically indicate MULTIPLE sub-requirements
+   - Qualifying phrases like "as appropriate", "where applicable", "including but not limited to" indicate scope boundaries that should be tested
+   - Do NOT collapse multiple distinct obligations into a single finding
 2. For each sub-requirement, determine if it is met, partially met, or missing based on the evidence
 3. Quote specific evidence passages that support your findings — copy text EXACTLY character-for-character from the document when possible
-4. Explain your analysis reasoning — describe HOW the evidence supports or fails to meet each sub-requirement
-5. Identify gaps where evidence is insufficient and explain why they matter
+4. Explain your analysis reasoning in depth — describe HOW the evidence supports or fails to meet each sub-requirement, WHAT specific aspect of the evidence is relevant, and WHY your assessment is what it is. Do not just restate the requirement or the evidence — provide analytical insight.
+5. Identify gaps where evidence is insufficient and explain why they matter for compliance
 6. Provide actionable recommendations
 7. For each evidence passage found, provide the exact character offset location within the document text to enable visual highlighting in the document viewer
 
-Your analysis should be thorough and explanatory. Don't just state whether something is met or missing — explain your reasoning so an auditor can understand your assessment.
+THOROUGHNESS IS CRITICAL. In a compliance audit, missing a sub-requirement can mean missing a finding. It is far better to have too many granular sub-requirements than too few vague ones. An auditor using your output should see every individual obligation in the requirement text addressed as its own finding.
 
 If the user provides custom analysis instructions, you MUST follow them. They take priority over default analysis behavior and may adjust what you focus on, how detailed your analysis is, or how you format your recommendations.
 
@@ -155,11 +163,35 @@ Return a JSON object with this structure. Adapt the depth and detail to what is 
 
 For evidence_found: STRONGLY prefer copying exact text from the document character-for-character — this text is matched against the document to create highlights in the document viewer. Include enough surrounding context (at least 1-2 full sentences) to make the highlighted passage meaningful. If the evidence is spread across sections or you cannot quote verbatim, describe what you found but wrap any key phrases or titles from the document in 'single quotes' so they can still be located.
 
-For analysis_notes: This is REQUIRED for every sub-requirement. Explain your reasoning — how does this specific evidence demonstrate (or fail to demonstrate) compliance? What does it tell an auditor? This is where you provide the analytical insight.
+For analysis_notes: This is REQUIRED for every sub-requirement. Provide substantive analytical reasoning:
+- For "met" items: explain WHAT specific language, policy, or mechanism in the evidence satisfies the requirement, and HOW it demonstrates compliance. Do not just say "the document addresses this."
+- For "partial" items: explain WHAT is present in the evidence, WHAT is missing or insufficient, and WHY the gap matters for compliance.
+- For "missing" items: explain WHAT you looked for in the document, confirm that no relevant content was found, and explain the compliance risk of this gap.
 
 For evidence_location: Count the character position (0-indexed) where your quoted evidence_found text starts and ends within the "Evidence Document Content" section above. If you cannot determine the exact position, set start_index and end_index to -1 and section_context to null.
 
-Break the requirement into its natural sub-requirements — use as many or as few as the requirement warrants. Be precise about what evidence supports or contradicts each.`;
+CRITICAL — Sub-requirement decomposition rules:
+You MUST break the requirement into ALL of its individually testable assertions. Follow these rules:
+1. Every distinct subject/actor mentioned (personnel, contractors, third parties, etc.) that has an obligation = separate sub-requirement per actor
+2. Every distinct action/obligation (return, notify, document, review, etc.) = separate sub-requirement per action
+3. Every distinct object/asset type (physical assets, information assets, access credentials, etc.) = separate sub-requirement per object
+4. Every distinct condition/trigger (upon termination, upon transfer, change of contract, etc.) = separate sub-requirement per trigger
+5. Every distinct timing/frequency constraint (within N days, annually, before departure) = separate sub-requirement
+6. Comma-separated lists, "and"/"or" conjunctions, and semicolons almost always indicate multiple sub-requirements
+7. Qualifying phrases ("as appropriate", "where applicable", "including but not limited to") indicate scope boundaries — test whether the evidence addresses them
+
+Example: "Personnel and other interested parties as appropriate should return all the organization's assets in their possession upon change or termination of their employment, contract or agreement" contains AT MINIMUM:
+- REQ-1: Personnel must return assets (actor: personnel)
+- REQ-2: Other interested parties must return assets (actor: interested parties)
+- REQ-3: "As appropriate" scope defined — criteria for which parties are included
+- REQ-4: ALL organization's assets must be returned (scope: completeness)
+- REQ-5: Assets "in their possession" must be covered (scope: possession)
+- REQ-6: Return triggered upon change of employment
+- REQ-7: Return triggered upon termination of employment
+- REQ-8: Return triggered upon change/termination of contract
+- REQ-9: Return triggered upon change/termination of agreement
+
+Produce at least this level of granularity. It is always better to over-decompose than to under-decompose.`;
 }
 
 /**
@@ -217,11 +249,23 @@ For evidence_found: STRONGLY prefer copying exact text from the document charact
 
 CRITICAL for evidence_source: You MUST specify the exact filename of the document where each piece of evidence was found. Use the filenames from the "=== DOCUMENT N: filename ===" headers.
 
-For analysis_notes: REQUIRED for every sub-requirement. Explain your reasoning — how does this evidence demonstrate compliance?
+For analysis_notes: REQUIRED for every sub-requirement. Provide substantive analytical reasoning:
+- For "met" items: explain WHAT specific language, policy, or mechanism satisfies the requirement, and HOW it demonstrates compliance.
+- For "partial" items: explain WHAT is present, WHAT is missing or insufficient, and WHY the gap matters.
+- For "missing" items: confirm you searched across ALL documents and found nothing relevant. Explain the compliance risk.
 
 For evidence_location: Count the character position (0-indexed) where your quoted evidence_found text starts and ends within the combined "Evidence Documents" section above (including the document separator headers). If you cannot determine the exact position, set start_index and end_index to -1.
 
-Break the requirement into its natural sub-requirements — use as many or as few as the requirement warrants. A sub-requirement can be satisfied by evidence from ANY of the documents.`;
+CRITICAL — Sub-requirement decomposition rules:
+You MUST break the requirement into ALL of its individually testable assertions:
+1. Every distinct subject/actor with an obligation = separate sub-requirement
+2. Every distinct action/obligation = separate sub-requirement
+3. Every distinct object/asset/scope item = separate sub-requirement
+4. Every distinct condition/trigger = separate sub-requirement
+5. Every distinct timing/frequency constraint = separate sub-requirement
+6. Comma-separated lists, "and"/"or" conjunctions, and semicolons = multiple sub-requirements
+7. Qualifying phrases ("as appropriate", "where applicable") = scope boundary to test
+It is always better to over-decompose than to under-decompose. A sub-requirement can be satisfied by evidence from ANY of the documents.`;
 }
 
 /**
@@ -287,7 +331,20 @@ Return a JSON object. You MUST evaluate every control listed above. For each con
 CRITICAL: You MUST include ALL ${controls.length} controls in the "controls" array — one entry per control listed above.
 CRITICAL for evidence_found: STRONGLY prefer copying exact text character-for-character — this text is matched against the document to create highlights in the viewer. If evidence is contextual, describe what supports the finding but wrap key phrases from the document in 'single quotes'.
 CRITICAL for evidence_source: Specify the exact filename from the "=== DOCUMENT N: filename ===" headers.
-CRITICAL for analysis_notes: Provide thorough reasoning for each finding — explain how the evidence connects to the requirement and why you rated it met/partial/missing.
+CRITICAL for analysis_notes: Provide substantive reasoning for each finding:
+- For "met" items: identify the specific mechanism, policy, or language that satisfies the requirement.
+- For "partial" items: state what is present and what is missing, and why the gap matters.
+- For "missing" items: confirm no relevant content exists across all documents and explain the compliance risk.
+
+CRITICAL — Sub-requirement decomposition for EACH control:
+For each control's requirements_breakdown, you MUST decompose the requirement into ALL individually testable assertions:
+- Every distinct subject/actor with an obligation = separate sub-requirement
+- Every distinct action/obligation = separate sub-requirement
+- Every distinct object/asset/scope item = separate sub-requirement
+- Every distinct condition/trigger = separate sub-requirement
+- Every distinct timing/frequency = separate sub-requirement
+- Comma-separated lists and conjunctions = multiple sub-requirements
+It is always better to over-decompose than to under-decompose.
 
 Each control should be evaluated independently. A piece of evidence in any document can satisfy requirements for multiple controls.`;
 }
@@ -365,6 +422,7 @@ Your task is to:
 5. For photos of physical security controls, describe what you see and assess whether the controls shown meet the requirement.
 6. For scanned documents, extract the text and analyze it like a regular document.
 7. Explain HOW what you see in the image relates to the compliance requirement — don't just state met/missing, explain your reasoning.
+8. EXHAUSTIVELY decompose the requirement into ALL testable sub-requirements. Each distinct actor, action, object, condition, and timing constraint in the requirement should produce its own finding. It is better to over-decompose than to under-decompose.
 
 Your analysis should paint a clear picture for an auditor who hasn't seen the image. Describe what you observe, what it means, and how it relates to the requirement.
 
@@ -417,8 +475,21 @@ Return a JSON object with this structure:
 CRITICAL: Include the "extracted_text" field with ALL text you can read from the image.
 For visual_description: Describe what you SEE — paint a picture for an auditor who hasn't viewed the image. Include UI layout, visible settings, configuration states, labels, indicators, or physical elements.
 For evidence_found: Describe the specific visual evidence that addresses the requirement. Be concrete about what you observe.
-For analysis_notes: Explain your reasoning — HOW does what you see support or fail to support compliance? What does it tell an auditor?
-For evidence_location: always use start_index: -1 and end_index: -1 since this is an image. Use section_context to describe the location within the image.`;
+For analysis_notes: Provide substantive reasoning:
+- For "met" items: identify the specific visual element or text that satisfies the requirement.
+- For "partial" items: state what is visible and what is absent, and why the gap matters.
+- For "missing" items: describe what you looked for in the image and confirm it is not present.
+For evidence_location: always use start_index: -1 and end_index: -1 since this is an image. Use section_context to describe the location within the image.
+
+CRITICAL — Sub-requirement decomposition:
+You MUST break the requirement into ALL of its individually testable assertions:
+- Every distinct subject/actor with an obligation = separate sub-requirement
+- Every distinct action/obligation = separate sub-requirement
+- Every distinct object/asset/scope item = separate sub-requirement
+- Every distinct condition/trigger = separate sub-requirement
+- Every distinct timing/frequency = separate sub-requirement
+- Conjunctions and comma-separated lists = multiple sub-requirements
+It is always better to over-decompose than to under-decompose.`;
 }
 
 /**
@@ -955,4 +1026,4 @@ async function enhanceFrameworkControls(controls, context = {}) {
   }
 }
 
-module.exports = { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls };
+module.exports = { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, SYSTEM_PROMPT };
