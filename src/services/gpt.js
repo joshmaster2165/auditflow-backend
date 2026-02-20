@@ -114,13 +114,6 @@ Your task is to analyze whether evidence documents satisfy specific compliance r
 
 THOROUGHNESS IS CRITICAL. In a compliance audit, missing a sub-requirement can mean missing a finding. It is far better to have too many granular sub-requirements than too few vague ones. An auditor using your output should see every individual obligation in the requirement text addressed as its own finding.
 
-EVIDENCE MATCHING PRECISION — apply these when evaluating whether evidence satisfies a sub-requirement:
-- Evidence must SPECIFICALLY address the requirement, not merely be from a related domain. A "Secure Coding Policy" does not satisfy a requirement for an "Information Security Policy" — they are different documents with different scopes, even though they are related topics.
-- Look for explicit language in the evidence that directly maps to the obligation in the requirement. Do not give credit for tangential or adjacent coverage.
-- If the evidence covers a related but different topic, rate the sub-requirement as "partial" (if there is some overlap) or "missing" (if the evidence is about a fundamentally different subject), and explain in analysis_notes exactly why the evidence does not fully satisfy this specific requirement.
-- Do not assume that because an organization has one type of policy, they necessarily have another. Each requirement must be independently verified by the evidence provided.
-- Be precise in your analysis_notes: state what the evidence ACTUALLY covers vs. what the requirement SPECIFICALLY asks for, so the auditor can see the gap clearly.
-
 If the user provides custom analysis instructions, you MUST follow them. They take priority over default analysis behavior and may adjust what you focus on, how detailed your analysis is, or how you format your recommendations.
 
 You must respond with valid JSON only. Do not include any text outside the JSON object.`;
@@ -199,6 +192,80 @@ Example: "Personnel and other interested parties as appropriate should return al
 - REQ-9: Return triggered upon change/termination of agreement
 
 Produce at least this level of granularity. It is always better to over-decompose than to under-decompose.`;
+}
+
+/**
+ * Build a multi-evidence user prompt for consolidated analysis.
+ * Formats multiple documents into one prompt, telling GPT to cite which
+ * document each piece of evidence came from.
+ */
+function buildMultiEvidenceUserPrompt(combinedDocumentText, requirementText, controlName, customInstructions, documentNames) {
+  return `Analyze the following evidence documents against the compliance requirement.
+
+IMPORTANT: You are receiving ${documentNames.length} separate evidence documents combined together. Each document is delimited by "=== DOCUMENT N: filename ===" headers. When citing evidence, you MUST specify which document the evidence came from using the "evidence_source" field.
+
+## Control: ${controlName || 'Unnamed Control'}
+
+## Compliance Requirement:
+${requirementText}
+
+## Evidence Documents:
+${combinedDocumentText}
+${customInstructions ? `
+## Custom Analysis Instructions:
+The following project-level guidance MUST be applied to this analysis. These instructions take priority over default analysis behavior:
+${customInstructions}
+` : ''}
+## Output Format:
+Return a JSON object with this structure. Assess compliance across ALL documents combined — a requirement may be satisfied by evidence from any of the documents:
+
+{
+  "status": "compliant" | "partial" | "non_compliant",
+  "confidence_score": <number 0.0-1.0>,
+  "compliance_percentage": <number 0-100>,
+  "summary": "<concise summary of overall findings across ALL documents>",
+  "requirements_breakdown": [
+    {
+      "requirement_id": "<short ID like REQ-1>",
+      "requirement_text": "<the sub-requirement being tested>",
+      "status": "met" | "partial" | "missing",
+      "evidence_found": "<STRONGLY prefer an EXACT verbatim quote copied character-for-character from the document — this text is used to highlight passages in the document viewer. If no verbatim quote is possible, describe what supports this finding and include key phrases from the document in 'single quotes'.>",
+      "evidence_source": "<EXACT filename of the document this evidence came from, e.g. '${documentNames[0] || 'document.pdf'}'>",
+      "analysis_notes": "<your analysis reasoning: explain HOW this evidence supports or fails to meet the requirement, and what it demonstrates about compliance>",
+      "evidence_location": {
+        "start_index": <0-indexed character position where the evidence_found quote begins in the combined Evidence Documents text above>,
+        "end_index": <0-indexed character position where the quote ends>,
+        "section_context": "<heading or section name where this evidence appears, or null>"
+      },
+      "gap_description": "<what is missing and WHY it matters for compliance, or null if fully met>",
+      "confidence": <number 0.0-1.0>
+    }
+  ],
+  "recommendations": ["<actionable recommendation>", ...],
+  "critical_gaps": ["<critical finding>", ...]
+}
+
+For evidence_found: STRONGLY prefer copying exact text from the document character-for-character — this text is matched against the document to create highlights in the document viewer. If the evidence is contextual or spread across sections, describe what you found but wrap any key phrases or titles from the document in 'single quotes' so they can still be located.
+
+CRITICAL for evidence_source: You MUST specify the exact filename of the document where each piece of evidence was found. Use the filenames from the "=== DOCUMENT N: filename ===" headers.
+
+For analysis_notes: REQUIRED for every sub-requirement. Provide substantive analytical reasoning:
+- For "met" items: explain WHAT specific language, policy, or mechanism satisfies the requirement, and HOW it demonstrates compliance.
+- For "partial" items: explain WHAT is present, WHAT is missing or insufficient, and WHY the gap matters.
+- For "missing" items: confirm you searched across ALL documents and found nothing relevant. Explain the compliance risk.
+
+For evidence_location: Count the character position (0-indexed) where your quoted evidence_found text starts and ends within the combined "Evidence Documents" section above (including the document separator headers). If you cannot determine the exact position, set start_index and end_index to -1.
+
+CRITICAL — Sub-requirement decomposition rules:
+You MUST break the requirement into ALL of its individually testable assertions:
+1. Every distinct subject/actor with an obligation = separate sub-requirement
+2. Every distinct action/obligation = separate sub-requirement
+3. Every distinct object/asset/scope item = separate sub-requirement
+4. Every distinct condition/trigger = separate sub-requirement
+5. Every distinct timing/frequency constraint = separate sub-requirement
+6. Comma-separated lists, "and"/"or" conjunctions, and semicolons = multiple sub-requirements
+7. Qualifying phrases ("as appropriate", "where applicable") = scope boundary to test
+It is always better to over-decompose than to under-decompose. A sub-requirement can be satisfied by evidence from ANY of the documents.`;
 }
 
 /**
@@ -959,47 +1026,4 @@ async function enhanceFrameworkControls(controls, context = {}) {
   }
 }
 
-/**
- * Analyze image evidence against multiple controls in one GPT call.
- * Uses the shared OpenAI client (replaces inline client instantiation in analyze-all).
- *
- * @param {string} imageBase64 - Base64-encoded image data
- * @param {string} mimeType - Image MIME type (e.g., 'image/png')
- * @param {string} userPromptText - The full multi-control analysis prompt text
- * @returns {{ analysis, model, usage, finish_reason }}
- */
-async function analyzeImageEvidenceMultiControl(imageBase64, mimeType, userPromptText) {
-  const contentParts = [
-    { type: 'text', text: userPromptText },
-    { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
-  ];
-
-  try {
-    const response = await openai.chat.completions.create({
-      model: GPT_MODEL,
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: contentParts },
-      ],
-      temperature: GPT_TEMPERATURE,
-      max_tokens: GPT_MAX_TOKENS,
-      response_format: { type: 'json_object' },
-    });
-
-    const choice = response.choices[0];
-    let analysis;
-    try {
-      analysis = JSON.parse(choice.message.content);
-    } catch (e) {
-      throw new Error('GPT returned invalid JSON for multi-control image evidence');
-    }
-    analysis.status = analysis.overall_status || analysis.status || 'non_compliant';
-    analysis.controls = Array.isArray(analysis.controls) ? analysis.controls : [];
-
-    return { analysis, model: response.model, usage: response.usage, finish_reason: choice.finish_reason };
-  } catch (err) {
-    handleOpenAIError(err);
-  }
-}
-
-module.exports = { analyzeEvidence, analyzeImageEvidence, analyzeImageEvidenceMultiControl, normalizeGptAnalysis, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, SYSTEM_PROMPT };
+module.exports = { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildMultiEvidenceUserPrompt, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, SYSTEM_PROMPT };

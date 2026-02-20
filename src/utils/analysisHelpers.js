@@ -2,7 +2,7 @@ const { supabase } = require('./supabase');
 const { analyzeEvidence, analyzeImageEvidence } = require('../services/gpt');
 const { generateDiff } = require('../services/diffGenerator');
 
-const RATE_LIMIT_RETRY_DELAYS = [30000, 60000, 120000]; // escalating backoff: 30s, 60s, 120s
+const RATE_LIMIT_RETRY_DELAY_MS = 60000;
 
 /**
  * Build a standardized analysis_results DB record.
@@ -62,72 +62,95 @@ async function analyzeControlWithRetry({
     return analyzeEvidence(documentText, requirementText, controlName, customInstructions);
   };
 
-  // Attempt GPT call with escalating rate-limit retries (30s, 60s, 120s)
-  let lastErr;
-  for (let attempt = 0; attempt <= RATE_LIMIT_RETRY_DELAYS.length; attempt++) {
-    try {
-      const gptResult = await runAnalysis();
-      const diffData = generateDiff(gptResult.analysis, requirementText);
+  try {
+    const gptResult = await runAnalysis();
+    const diffData = generateDiff(gptResult.analysis, requirementText);
 
-      if (imageContent) {
-        diffData.extracted_text = gptResult.analysis.extracted_text || '';
-        diffData.is_image = true;
-      }
+    // Store extracted text for image evidence
+    if (imageContent) {
+      diffData.extracted_text = gptResult.analysis.extracted_text || '';
+      diffData.is_image = true;
+    }
 
-      const record = buildAnalysisRecord({ evidenceId, controlId: control.id, projectId, gptResult, diffData });
+    const record = buildAnalysisRecord({ evidenceId, controlId: control.id, projectId, gptResult, diffData });
 
-      const { data: saved, error: saveError } = await supabase
-        .from('analysis_results')
-        .insert(record)
-        .select()
-        .single();
+    const { data: saved, error: saveError } = await supabase
+      .from('analysis_results')
+      .insert(record)
+      .select()
+      .single();
 
-      if (saveError) {
-        console.error(`⚠️ [${logPrefix}] DB save failed for ${control.control_number}: ${saveError.message}`);
-      }
+    if (saveError) {
+      console.error(`\u26a0\ufe0f [${logPrefix}] DB save failed for ${control.control_number}: ${saveError.message}`);
+    }
 
-      if (attempt > 0) {
-        console.log(`✅ [${logPrefix}] Retry ${attempt} succeeded for ${control.control_number}`);
-      }
+    return {
+      analysis_id: saved?.id || null,
+      control_id: control.id,
+      control_number: control.control_number,
+      control_title: control.title,
+      status: gptResult.analysis.status,
+      compliance_percentage: gptResult.analysis.compliance_percentage,
+      confidence_score: gptResult.analysis.confidence_score,
+      summary: gptResult.analysis.summary,
+      save_error: saveError?.message || null,
+      usage: gptResult.usage,
+    };
+  } catch (err) {
+    // Rate limit retry (once)
+    if (err.message?.includes('429') || err.message?.toLowerCase().includes('rate limit')) {
+      console.log(`\u23f3 [${logPrefix}] Rate limited. Waiting 60s before retrying ${control.control_number}...`);
+      await new Promise(r => setTimeout(r, RATE_LIMIT_RETRY_DELAY_MS));
 
-      return {
-        analysis_id: saved?.id || null,
-        control_id: control.id,
-        control_number: control.control_number,
-        control_title: control.title,
-        status: gptResult.analysis.status,
-        compliance_percentage: gptResult.analysis.compliance_percentage,
-        confidence_score: gptResult.analysis.confidence_score,
-        summary: gptResult.analysis.summary,
-        save_error: saveError?.message || null,
-        usage: gptResult.usage,
-      };
-    } catch (err) {
-      lastErr = err;
-      const isRateLimit = err.message?.includes('429') || err.message?.toLowerCase().includes('rate limit');
-      if (isRateLimit && attempt < RATE_LIMIT_RETRY_DELAYS.length) {
-        const delay = RATE_LIMIT_RETRY_DELAYS[attempt];
-        console.log(`⏳ [${logPrefix}] Rate limited. Waiting ${delay / 1000}s before retry ${attempt + 1}/${RATE_LIMIT_RETRY_DELAYS.length} for ${control.control_number}...`);
-        await new Promise(r => setTimeout(r, delay));
-      } else {
-        break; // non-rate-limit error or exhausted retries
+      try {
+        const gptResult = await runAnalysis();
+        const diffData = generateDiff(gptResult.analysis, requirementText);
+
+        if (imageContent) {
+          diffData.extracted_text = gptResult.analysis.extracted_text || '';
+          diffData.is_image = true;
+        }
+
+        const record = buildAnalysisRecord({ evidenceId, controlId: control.id, projectId, gptResult, diffData });
+
+        const { data: saved, error: saveError } = await supabase
+          .from('analysis_results')
+          .insert(record)
+          .select()
+          .single();
+
+        console.log(`\u2705 [${logPrefix}] Retry succeeded for ${control.control_number}`);
+        return {
+          analysis_id: saved?.id || null,
+          control_id: control.id,
+          control_number: control.control_number,
+          control_title: control.title,
+          status: gptResult.analysis.status,
+          compliance_percentage: gptResult.analysis.compliance_percentage,
+          confidence_score: gptResult.analysis.confidence_score,
+          summary: gptResult.analysis.summary,
+          save_error: saveError?.message || null,
+          usage: gptResult.usage,
+        };
+      } catch (retryErr) {
+        console.error(`\u274c [${logPrefix}] Retry also failed for ${control.control_number}: ${retryErr.message}`);
       }
     }
-  }
 
-  // All attempts failed — return error result
-  return {
-    analysis_id: null,
-    control_id: control.id,
-    control_number: control.control_number,
-    control_title: control.title,
-    status: 'error',
-    error: lastErr.message,
-    compliance_percentage: null,
-    confidence_score: null,
-    summary: null,
-    usage: null,
-  };
+    // Return error result
+    return {
+      analysis_id: null,
+      control_id: control.id,
+      control_number: control.control_number,
+      control_title: control.title,
+      status: 'error',
+      error: err.message,
+      compliance_percentage: null,
+      confidence_score: null,
+      summary: null,
+      usage: null,
+    };
+  }
 }
 
 /**
@@ -169,4 +192,66 @@ function createJobStore({
   return jobs;
 }
 
-module.exports = { buildAnalysisRecord, analyzeControlWithRetry, createJobStore };
+/**
+ * Group a flat requirements_breakdown array into a map keyed by evidence ID.
+ * Used by multi-evidence and analyze-all endpoints so the document viewer can
+ * switch evidence tabs reliably — direct lookup by ID instead of fuzzy filename matching.
+ *
+ * @param {Array} requirementsBreakdown - Flat array of findings (with evidence_source)
+ * @param {Array} evidenceList - Array of evidence records [{ id, file_name, ... }]
+ * @returns {Object} Map of { [evidenceId]: findings[] }
+ */
+function buildPerEvidenceBreakdown(requirementsBreakdown, evidenceList) {
+  if (!Array.isArray(requirementsBreakdown) || !Array.isArray(evidenceList) || evidenceList.length === 0) {
+    return {};
+  }
+
+  // Build filename → evidence_id lookup (multiple keys per evidence for flexible matching)
+  const nameToId = {};
+  for (const ev of evidenceList) {
+    const name = (ev.file_name || ev.fileName || '').toLowerCase().trim();
+    if (name) {
+      nameToId[name] = ev.id;
+      // Also map without extension for partial matches
+      const noExt = name.replace(/\.[^.]+$/, '');
+      if (noExt !== name) {
+        nameToId[noExt] = ev.id;
+      }
+    }
+  }
+
+  // Initialize all evidence IDs with empty arrays
+  const breakdown = {};
+  for (const ev of evidenceList) {
+    breakdown[ev.id] = [];
+  }
+
+  for (const finding of requirementsBreakdown) {
+    const src = (finding.evidence_source || '').toLowerCase().trim();
+    if (!src) continue;
+
+    // Try exact match first, then without extension, then fuzzy substring match
+    let matchedId = nameToId[src]
+      || nameToId[src.replace(/\.[^.]+$/, '')]
+      || null;
+
+    // Fuzzy fallback: check if any known name contains the source or vice versa
+    if (!matchedId) {
+      for (const [name, id] of Object.entries(nameToId)) {
+        if (name.includes(src) || src.includes(name)) {
+          matchedId = id;
+          break;
+        }
+      }
+    }
+
+    if (matchedId && breakdown[matchedId]) {
+      breakdown[matchedId].push(finding);
+    }
+    // If no match, finding stays in the flat requirements_breakdown only (combined view)
+  }
+
+  return breakdown;
+}
+
+module.exports = { buildAnalysisRecord, analyzeControlWithRetry, createJobStore, buildPerEvidenceBreakdown };
