@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const analyzeRoutes = require('./routes/analyze');
 const frameworkRoutes = require('./routes/framework');
 const { testConnection } = require('./utils/supabase');
@@ -48,6 +49,9 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true,
 }));
+
+// Response compression (gzip/brotli) — 70-85% smaller JSON payloads
+app.use(compression({ level: 6, threshold: 1024 }));
 
 // JSON body parser with 50mb limit
 app.use(express.json({ limit: '50mb' }));

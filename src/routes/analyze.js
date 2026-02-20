@@ -5,10 +5,10 @@ const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/
 const fs = require('fs');
 const { parseDocument, parseDocumentForViewer, isImageType } = require('../services/documentParser');
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
-const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, SYSTEM_PROMPT } = require('../services/gpt');
+const { analyzeEvidence, analyzeImageEvidence, analyzeImageEvidenceMultiControl, normalizeGptAnalysis, buildAnalyzeAllPrompt, SYSTEM_PROMPT } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
-const { createJobStore } = require('../utils/analysisHelpers');
+const { createJobStore, buildAnalysisRecord } = require('../utils/analysisHelpers');
 
 // ── Constants ──
 const MAX_COMBINED_TEXT_CHARS = 400000;
@@ -138,6 +138,18 @@ router.post('/evidence/:evidenceId', async (req, res) => {
       const documentText = await parseDocument(tempFilePath, mimeType);
       gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
       diffData = generateDiff(gptResult.analysis, requirementText);
+
+      // Pre-cache viewer data so /document-viewer/:analysisId never re-downloads
+      try {
+        const viewerParsed = await parseDocumentForViewer(tempFilePath, mimeType);
+        const highlightFindings = gptResult.analysis.requirements_breakdown || [];
+        const viewerHighlightRanges = verifyAndBuildHighlightRanges(viewerParsed.text, highlightFindings);
+        diffData.viewer_document_text = viewerParsed.text;
+        diffData.viewer_document_html = viewerParsed.html;
+        diffData.viewer_highlight_ranges = viewerHighlightRanges;
+      } catch (viewerErr) {
+        console.warn(`⚠️ Failed to pre-cache viewer data: ${viewerErr.message}`);
+      }
     }
 
     // 7. Store results in analysis_results table
@@ -312,11 +324,25 @@ router.get('/results/:evidenceId', async (req, res) => {
   }
 });
 
-// GET /api/analyze/project/:projectId/results - Aggregate project results
+// GET /api/analyze/project/:projectId/results - Aggregate project results (paginated)
 router.get('/project/:projectId/results', async (req, res) => {
   try {
     const { projectId } = req.params;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+    const offset = (page - 1) * limit;
 
+    // Get total count for pagination metadata
+    const { count: total, error: countError } = await supabase
+      .from('analysis_results')
+      .select('id', { count: 'exact', head: true })
+      .eq('project_id', projectId);
+
+    if (countError) {
+      return res.status(500).json({ error: 'Failed to count project results', details: countError.message });
+    }
+
+    // Fetch paginated results
     const { data: analyses, error } = await supabase
       .from('analysis_results')
       .select(`
@@ -325,46 +351,39 @@ router.get('/project/:projectId/results', async (req, res) => {
         controls:control_id (id, title)
       `)
       .eq('project_id', projectId)
-      .order('analyzed_at', { ascending: false });
+      .order('analyzed_at', { ascending: false })
+      .range(offset, offset + limit - 1);
 
     if (error) {
       return res.status(500).json({ error: 'Failed to fetch project results', details: error.message });
     }
 
-    // Calculate aggregate statistics
-    const total = analyses.length;
-    const compliant = analyses.filter(a => a.status === 'compliant').length;
-    const partial = analyses.filter(a => a.status === 'partial').length;
-    const nonCompliant = analyses.filter(a => a.status === 'non_compliant').length;
+    // Calculate aggregate statistics using shared function (excludes errors from averages)
+    const aggregate = computeGroupAggregate(analyses);
     const pending = analyses.filter(a => a.status === 'pending').length;
-    const errored = analyses.filter(a => a.status === 'error').length;
-
-    const avgCompliance = total > 0
-      ? Math.round(analyses.reduce((sum, a) => sum + (a.compliance_percentage || 0), 0) / total)
-      : 0;
-
-    const avgConfidence = total > 0
-      ? parseFloat((analyses.reduce((sum, a) => sum + (parseFloat(a.confidence_score) || 0), 0) / total).toFixed(2))
-      : 0;
 
     res.json({
       success: true,
       stats: {
-        total_analyses: total,
-        compliant,
-        partial,
-        non_compliant: nonCompliant,
+        total_analyses: aggregate.total_controls_analyzed,
+        total_in_project: total || 0,
+        compliant: aggregate.compliant,
+        partial: aggregate.partial,
+        non_compliant: aggregate.non_compliant,
         pending,
-        error: errored,
-        average_compliance_percentage: avgCompliance,
-        average_confidence_score: avgConfidence,
-        overall_status: compliant === total && total > 0
-          ? 'compliant'
-          : nonCompliant > 0
-            ? 'non_compliant'
-            : 'partial',
+        error: aggregate.errored,
+        average_compliance_percentage: aggregate.average_compliance_percentage,
+        average_confidence_score: aggregate.average_confidence_score,
+        overall_status: aggregate.overall_status,
       },
       analyses,
+      pagination: {
+        page,
+        limit,
+        total: total || 0,
+        total_pages: Math.ceil((total || 0) / limit),
+        has_next: offset + limit < (total || 0),
+      },
     });
   } catch (err) {
     console.error('❌ Project results error:', err.message);
@@ -1130,37 +1149,12 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         let gptResult;
 
         if (parsed.isImage) {
-          // ── IMAGE EVIDENCE: vision API with all controls ──
+          // ── IMAGE EVIDENCE: vision API with all controls (shared GPT client) ──
           const textPrompt = buildAnalyzeAllPrompt(
             '(Image evidence — see attached image)', controlsList, customInstructions, [ev.file_name]
           );
-          const contentParts = [
-            { type: 'text', text: textPrompt },
-            { type: 'text', text: `\n=== IMAGE EVIDENCE: ${ev.file_name} ===` },
-            { type: 'image_url', image_url: { url: `data:${parsed.mimeType};base64,${parsed.base64}`, detail: 'high' } },
-          ];
-
-          const OpenAI = require('openai');
-          const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-          const response = await openai.chat.completions.create({
-            model: 'gpt-4o',
-            messages: [
-              { role: 'system', content: SYSTEM_PROMPT },
-              { role: 'user', content: contentParts },
-            ],
-            temperature: 0.2,
-            max_tokens: 16384,
-            response_format: { type: 'json_object' },
-          });
-
-          const choice = response.choices[0];
-          let analysis;
-          try { analysis = JSON.parse(choice.message.content); } catch (e) {
-            throw new Error(`GPT returned invalid JSON for image evidence: ${ev.file_name}`);
-          }
-          analysis.status = analysis.overall_status || analysis.status || 'non_compliant';
-          analysis.controls = Array.isArray(analysis.controls) ? analysis.controls : [];
-          gptResult = { analysis, model: response.model, usage: response.usage, finish_reason: choice.finish_reason };
+          const fullPrompt = textPrompt + `\n=== IMAGE EVIDENCE: ${ev.file_name} ===`;
+          gptResult = await analyzeImageEvidenceMultiControl(parsed.base64, parsed.mimeType, fullPrompt);
         } else {
           // ── TEXT EVIDENCE: one doc + all controls ──
           const singleDocText = `\n\n=== DOCUMENT 1: ${ev.file_name} ===\n\n${parsed.text}`;
@@ -1218,26 +1212,19 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
           const requirementText = buildRequirementText(child, child.frameworks);
           const diffData = generateDiff(controlAnalysis, requirementText);
 
-          const analysisRecord = {
-            evidence_id: ev.id,
-            control_id: child.id,
-            project_id: projectId,
-            analyzed_at: new Date().toISOString(),
-            analysis_version: 'v2.0-pair',
-            model_used: gptResult.model || 'gpt-4o',
-            status: controlAnalysis.status,
-            confidence_score: controlAnalysis.confidence_score,
-            compliance_percentage: controlAnalysis.compliance_percentage,
-            findings: controlAnalysis,
-            diff_data: diffData,
-            summary: controlAnalysis.summary,
-            recommendations: controlAnalysis.recommendations,
-            raw_response: {
+          const analysisRecord = buildAnalysisRecord({
+            evidenceId: ev.id,
+            controlId: child.id,
+            projectId,
+            gptResult: {
+              analysis: controlAnalysis,
+              model: gptResult.model,
               usage: gptResult.usage,
               finish_reason: gptResult.finish_reason,
-              model: gptResult.model,
             },
-          };
+            diffData,
+            version: 'v2.0-pair',
+          });
 
           const { data: saved, error: saveError } = await supabase
             .from('analysis_results')

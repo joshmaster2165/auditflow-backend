@@ -175,43 +175,49 @@ async function executeGroupAnalysisLoop({ jobId, evidence, childControls, jobs, 
       console.log(`📄 [${logPrefix}] Document parsed: ${documentText.length} chars`);
     }
 
-    // Analyze each control sequentially
+    // Analyze controls in parallel batches (3 concurrent GPT calls)
     const results = [];
     const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    const CONCURRENCY = 3;
 
-    for (let i = 0; i < childControls.length; i++) {
-      const ctrl = childControls[i];
-      const controlName = ctrl.title || `Control ${ctrl.control_number}`;
+    for (let batchStart = 0; batchStart < childControls.length; batchStart += CONCURRENCY) {
+      const batch = childControls.slice(batchStart, batchStart + CONCURRENCY);
+      const batchEnd = Math.min(batchStart + batch.length, childControls.length);
 
-      const progressMsg = `Analyzing control ${i + 1} of ${childControls.length} (${ctrl.control_number} - ${controlName})`;
       if (job) {
-        job.progress = progressMsg;
-        job.controlsCompleted = i;
+        job.progress = `Analyzing controls ${batchStart + 1}-${batchEnd} of ${childControls.length}`;
+        job.controlsCompleted = batchStart;
       }
 
-      const result = await analyzeControlWithRetry({
-        control: ctrl,
-        documentText,
-        customInstructions,
-        evidenceId: evidence.id,
-        projectId: evidence.project_id,
-        buildRequirementText,
-        logPrefix,
-        imageContent,
-      });
+      const batchPromises = batch.map((ctrl) =>
+        analyzeControlWithRetry({
+          control: ctrl,
+          documentText,
+          customInstructions,
+          evidenceId: evidence.id,
+          projectId: evidence.project_id,
+          buildRequirementText,
+          logPrefix,
+          imageContent,
+        })
+      );
 
-      results.push(result);
+      const batchResults = await Promise.all(batchPromises);
 
-      if (result.usage) {
-        totalUsage.prompt_tokens += result.usage.prompt_tokens || 0;
-        totalUsage.completion_tokens += result.usage.completion_tokens || 0;
-        totalUsage.total_tokens += result.usage.total_tokens || 0;
-      }
+      for (const result of batchResults) {
+        results.push(result);
 
-      if (result.status !== 'error') {
-        console.log(`✅ [${logPrefix}] ${ctrl.control_number}: ${result.status} (${result.compliance_percentage}%)`);
-      } else {
-        console.error(`❌ [${logPrefix}] ${ctrl.control_number}: ${result.error}`);
+        if (result.usage) {
+          totalUsage.prompt_tokens += result.usage.prompt_tokens || 0;
+          totalUsage.completion_tokens += result.usage.completion_tokens || 0;
+          totalUsage.total_tokens += result.usage.total_tokens || 0;
+        }
+
+        if (result.status !== 'error') {
+          console.log(`✅ [${logPrefix}] ${result.control_number}: ${result.status} (${result.compliance_percentage}%)`);
+        } else {
+          console.error(`❌ [${logPrefix}] ${result.control_number}: ${result.error}`);
+        }
       }
     }
 
@@ -403,59 +409,59 @@ async function runGroupAnalysisByIds(jobId, evidenceId, controlIds, jobs) {
 async function findChildControls(parentControl, selectFields = '*, frameworks:framework_id (*)') {
   const frameworkId = parentControl.framework_id;
   const controlNumber = parentControl.control_number || '';
-  const parentId = parentControl.id;
 
-  // --- Strategy A: parent_control_number match (tree hierarchy) ---
-  const { data: treeChildren, error: treeError } = await supabase
-    .from('controls')
-    .select(selectFields)
-    .eq('framework_id', frameworkId)
-    .eq('parent_control_number', controlNumber)
-    .order('sort_order', { ascending: true });
-
-  if (!treeError && treeChildren && treeChildren.length > 0) {
-    console.log(`🔗 Found ${treeChildren.length} children via parent_control_number = "${controlNumber}"`);
-    return { childControls: treeChildren, matchStrategy: 'parent_control_number' };
-  }
-
-  // --- Strategy B: category match ---
-  // Controls that share the same category as the parent's title or control_number
+  // Build category filters for Strategy B
   const categoryFilters = [
     parentControl.category ? `category.eq.${parentControl.category}` : null,
     `category.eq.${controlNumber}`,
     `category.eq.${parentControl.title}`,
   ].filter(Boolean);
 
-  if (categoryFilters.length > 0) {
-    const { data: catChildren, error: catError } = await supabase
+  // Fire all three strategies in parallel (saves 2 round-trips when A misses)
+  const [treeResult, catResult, prefixResult] = await Promise.all([
+    // Strategy A: parent_control_number match (tree hierarchy)
+    supabase
       .from('controls')
       .select(selectFields)
       .eq('framework_id', frameworkId)
-      .or(categoryFilters.join(','))
-      .order('sort_order', { ascending: true });
+      .eq('parent_control_number', controlNumber)
+      .order('sort_order', { ascending: true }),
 
-    // For category match, include ALL peers (don't exclude the reference control)
-    if (!catError && catChildren && catChildren.length > 1) {
-      console.log(`🔗 Found ${catChildren.length} peers via category match (including reference)`);
-      return { childControls: catChildren, matchStrategy: 'category' };
-    }
+    // Strategy B: category match
+    categoryFilters.length > 0
+      ? supabase
+          .from('controls')
+          .select(selectFields)
+          .eq('framework_id', frameworkId)
+          .or(categoryFilters.join(','))
+          .order('sort_order', { ascending: true })
+      : Promise.resolve({ data: null, error: null }),
+
+    // Strategy C: control_number prefix match
+    controlNumber
+      ? supabase
+          .from('controls')
+          .select(selectFields)
+          .eq('framework_id', frameworkId)
+          .like('control_number', `${controlNumber}.%`)
+          .order('sort_order', { ascending: true })
+      : Promise.resolve({ data: null, error: null }),
+  ]);
+
+  // Pick first successful strategy (priority order preserved: A > B > C)
+  if (!treeResult.error && treeResult.data?.length > 0) {
+    console.log(`🔗 Found ${treeResult.data.length} children via parent_control_number = "${controlNumber}"`);
+    return { childControls: treeResult.data, matchStrategy: 'parent_control_number' };
   }
 
-  // --- Strategy C: control_number prefix match ---
-  // e.g. parent "3" finds "3.1", "3.1.1", "3.2", etc.
-  // e.g. parent "AC-1" finds "AC-1.1", "AC-1.2", etc.
-  if (controlNumber) {
-    const { data: prefixChildren, error: prefixError } = await supabase
-      .from('controls')
-      .select(selectFields)
-      .eq('framework_id', frameworkId)
-      .like('control_number', `${controlNumber}.%`)
-      .order('sort_order', { ascending: true });
+  if (!catResult.error && catResult.data?.length > 1) {
+    console.log(`🔗 Found ${catResult.data.length} peers via category match (including reference)`);
+    return { childControls: catResult.data, matchStrategy: 'category' };
+  }
 
-    if (!prefixError && prefixChildren && prefixChildren.length > 0) {
-      console.log(`🔗 Found ${prefixChildren.length} children via control_number prefix "${controlNumber}.%"`);
-      return { childControls: prefixChildren, matchStrategy: 'prefix' };
-    }
+  if (!prefixResult.error && prefixResult.data?.length > 0) {
+    console.log(`🔗 Found ${prefixResult.data.length} children via control_number prefix "${controlNumber}.%"`);
+    return { childControls: prefixResult.data, matchStrategy: 'prefix' };
   }
 
   // No children found with any strategy
