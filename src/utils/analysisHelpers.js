@@ -2,7 +2,7 @@ const { supabase } = require('./supabase');
 const { analyzeEvidence, analyzeImageEvidence } = require('../services/gpt');
 const { generateDiff } = require('../services/diffGenerator');
 
-const RATE_LIMIT_RETRY_DELAY_MS = 60000;
+const RATE_LIMIT_RETRY_DELAYS = [30000, 60000, 120000]; // escalating backoff: 30s, 60s, 120s
 
 /**
  * Build a standardized analysis_results DB record.
@@ -62,95 +62,72 @@ async function analyzeControlWithRetry({
     return analyzeEvidence(documentText, requirementText, controlName, customInstructions);
   };
 
-  try {
-    const gptResult = await runAnalysis();
-    const diffData = generateDiff(gptResult.analysis, requirementText);
+  // Attempt GPT call with escalating rate-limit retries (30s, 60s, 120s)
+  let lastErr;
+  for (let attempt = 0; attempt <= RATE_LIMIT_RETRY_DELAYS.length; attempt++) {
+    try {
+      const gptResult = await runAnalysis();
+      const diffData = generateDiff(gptResult.analysis, requirementText);
 
-    // Store extracted text for image evidence
-    if (imageContent) {
-      diffData.extracted_text = gptResult.analysis.extracted_text || '';
-      diffData.is_image = true;
-    }
+      if (imageContent) {
+        diffData.extracted_text = gptResult.analysis.extracted_text || '';
+        diffData.is_image = true;
+      }
 
-    const record = buildAnalysisRecord({ evidenceId, controlId: control.id, projectId, gptResult, diffData });
+      const record = buildAnalysisRecord({ evidenceId, controlId: control.id, projectId, gptResult, diffData });
 
-    const { data: saved, error: saveError } = await supabase
-      .from('analysis_results')
-      .insert(record)
-      .select()
-      .single();
+      const { data: saved, error: saveError } = await supabase
+        .from('analysis_results')
+        .insert(record)
+        .select()
+        .single();
 
-    if (saveError) {
-      console.error(`\u26a0\ufe0f [${logPrefix}] DB save failed for ${control.control_number}: ${saveError.message}`);
-    }
+      if (saveError) {
+        console.error(`⚠️ [${logPrefix}] DB save failed for ${control.control_number}: ${saveError.message}`);
+      }
 
-    return {
-      analysis_id: saved?.id || null,
-      control_id: control.id,
-      control_number: control.control_number,
-      control_title: control.title,
-      status: gptResult.analysis.status,
-      compliance_percentage: gptResult.analysis.compliance_percentage,
-      confidence_score: gptResult.analysis.confidence_score,
-      summary: gptResult.analysis.summary,
-      save_error: saveError?.message || null,
-      usage: gptResult.usage,
-    };
-  } catch (err) {
-    // Rate limit retry (once)
-    if (err.message?.includes('429') || err.message?.toLowerCase().includes('rate limit')) {
-      console.log(`\u23f3 [${logPrefix}] Rate limited. Waiting 60s before retrying ${control.control_number}...`);
-      await new Promise(r => setTimeout(r, RATE_LIMIT_RETRY_DELAY_MS));
+      if (attempt > 0) {
+        console.log(`✅ [${logPrefix}] Retry ${attempt} succeeded for ${control.control_number}`);
+      }
 
-      try {
-        const gptResult = await runAnalysis();
-        const diffData = generateDiff(gptResult.analysis, requirementText);
-
-        if (imageContent) {
-          diffData.extracted_text = gptResult.analysis.extracted_text || '';
-          diffData.is_image = true;
-        }
-
-        const record = buildAnalysisRecord({ evidenceId, controlId: control.id, projectId, gptResult, diffData });
-
-        const { data: saved, error: saveError } = await supabase
-          .from('analysis_results')
-          .insert(record)
-          .select()
-          .single();
-
-        console.log(`\u2705 [${logPrefix}] Retry succeeded for ${control.control_number}`);
-        return {
-          analysis_id: saved?.id || null,
-          control_id: control.id,
-          control_number: control.control_number,
-          control_title: control.title,
-          status: gptResult.analysis.status,
-          compliance_percentage: gptResult.analysis.compliance_percentage,
-          confidence_score: gptResult.analysis.confidence_score,
-          summary: gptResult.analysis.summary,
-          save_error: saveError?.message || null,
-          usage: gptResult.usage,
-        };
-      } catch (retryErr) {
-        console.error(`\u274c [${logPrefix}] Retry also failed for ${control.control_number}: ${retryErr.message}`);
+      return {
+        analysis_id: saved?.id || null,
+        control_id: control.id,
+        control_number: control.control_number,
+        control_title: control.title,
+        status: gptResult.analysis.status,
+        compliance_percentage: gptResult.analysis.compliance_percentage,
+        confidence_score: gptResult.analysis.confidence_score,
+        summary: gptResult.analysis.summary,
+        save_error: saveError?.message || null,
+        usage: gptResult.usage,
+      };
+    } catch (err) {
+      lastErr = err;
+      const isRateLimit = err.message?.includes('429') || err.message?.toLowerCase().includes('rate limit');
+      if (isRateLimit && attempt < RATE_LIMIT_RETRY_DELAYS.length) {
+        const delay = RATE_LIMIT_RETRY_DELAYS[attempt];
+        console.log(`⏳ [${logPrefix}] Rate limited. Waiting ${delay / 1000}s before retry ${attempt + 1}/${RATE_LIMIT_RETRY_DELAYS.length} for ${control.control_number}...`);
+        await new Promise(r => setTimeout(r, delay));
+      } else {
+        break; // non-rate-limit error or exhausted retries
       }
     }
-
-    // Return error result
-    return {
-      analysis_id: null,
-      control_id: control.id,
-      control_number: control.control_number,
-      control_title: control.title,
-      status: 'error',
-      error: err.message,
-      compliance_percentage: null,
-      confidence_score: null,
-      summary: null,
-      usage: null,
-    };
   }
+
+  // All attempts failed — return error result
+  return {
+    analysis_id: null,
+    control_id: control.id,
+    control_number: control.control_number,
+    control_title: control.title,
+    status: 'error',
+    error: lastErr.message,
+    compliance_percentage: null,
+    confidence_score: null,
+    summary: null,
+    usage: null,
+  };
 }
 
 /**
@@ -192,4 +169,4 @@ function createJobStore({
   return jobs;
 }
 
-module.exports = { buildAnalysisRecord, analyzeControlWithRetry, createJobStore, RATE_LIMIT_RETRY_DELAY_MS };
+module.exports = { buildAnalysisRecord, analyzeControlWithRetry, createJobStore };

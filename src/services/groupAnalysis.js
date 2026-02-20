@@ -175,13 +175,14 @@ async function executeGroupAnalysisLoop({ jobId, evidence, childControls, jobs, 
       console.log(`📄 [${logPrefix}] Document parsed: ${documentText.length} chars`);
     }
 
-    // Analyze controls in parallel batches (3 concurrent GPT calls)
+    // Analyze controls in batches (GPT_CONCURRENCY defaults to 1 for Tier 1 rate limits)
     const results = [];
     const totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-    const CONCURRENCY = 3;
+    const GPT_CONCURRENCY = parseInt(process.env.GPT_CONCURRENCY, 10) || 1;
+    const GPT_CALL_DELAY_MS = parseInt(process.env.GPT_CALL_DELAY_MS, 10) || 0;
 
-    for (let batchStart = 0; batchStart < childControls.length; batchStart += CONCURRENCY) {
-      const batch = childControls.slice(batchStart, batchStart + CONCURRENCY);
+    for (let batchStart = 0; batchStart < childControls.length; batchStart += GPT_CONCURRENCY) {
+      const batch = childControls.slice(batchStart, batchStart + GPT_CONCURRENCY);
       const batchEnd = Math.min(batchStart + batch.length, childControls.length);
 
       if (job) {
@@ -218,6 +219,12 @@ async function executeGroupAnalysisLoop({ jobId, evidence, childControls, jobs, 
         } else {
           console.error(`❌ [${logPrefix}] ${result.control_number}: ${result.error}`);
         }
+      }
+
+      // Inter-batch delay to avoid rate limits
+      if (GPT_CALL_DELAY_MS > 0 && batchStart + GPT_CONCURRENCY < childControls.length) {
+        console.log(`⏳ [${logPrefix}] Waiting ${GPT_CALL_DELAY_MS}ms before next batch...`);
+        await new Promise(r => setTimeout(r, GPT_CALL_DELAY_MS));
       }
     }
 

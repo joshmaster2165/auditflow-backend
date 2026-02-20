@@ -8,11 +8,14 @@ const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
 const { analyzeEvidence, analyzeImageEvidence, analyzeImageEvidenceMultiControl, normalizeGptAnalysis, buildAnalyzeAllPrompt, SYSTEM_PROMPT } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
-const { createJobStore, buildAnalysisRecord, RATE_LIMIT_RETRY_DELAY_MS } = require('../utils/analysisHelpers');
+const { createJobStore, buildAnalysisRecord } = require('../utils/analysisHelpers');
 
 // ── Constants ──
 const MAX_COMBINED_TEXT_CHARS = 400000;
 const MAX_IMAGE_FILES = 10;
+const GPT_CONCURRENCY = parseInt(process.env.GPT_CONCURRENCY, 10) || 1;
+const GPT_CALL_DELAY_MS = parseInt(process.env.GPT_CALL_DELAY_MS, 10) || 0;
+const RATE_LIMIT_RETRY_DELAYS = [30000, 60000, 120000]; // escalating backoff: 30s, 60s, 120s
 
 // ── In-memory job store for async group analysis ──
 const jobs = createJobStore({ processingTimeoutMs: 20 * 60 * 1000 });
@@ -1138,11 +1141,10 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
 
     const results = [];
     let totalUsage = null;
-    const CONCURRENCY = 3;
 
-    // Process evidence files in parallel batches of CONCURRENCY
-    for (let batchStart = 0; batchStart < allParsedEvidence.length; batchStart += CONCURRENCY) {
-      const batch = allParsedEvidence.slice(batchStart, batchStart + CONCURRENCY);
+    // Process evidence files in batches (GPT_CONCURRENCY defaults to 1 for Tier 1 rate limits)
+    for (let batchStart = 0; batchStart < allParsedEvidence.length; batchStart += GPT_CONCURRENCY) {
+      const batch = allParsedEvidence.slice(batchStart, batchStart + GPT_CONCURRENCY);
 
       const batchPromises = batch.map(async (parsed) => {
         const ev = parsed.evidence;
@@ -1170,16 +1172,20 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
           }
         };
 
-        // First attempt + rate-limit retry (once, 60s delay)
-        try {
-          gptResult = await runGptCall();
-        } catch (err) {
-          if (err.message?.includes('429') || err.message?.toLowerCase().includes('rate limit')) {
-            console.log(`⏳ Rate limited on ${ev.file_name}. Waiting 60s before retrying...`);
-            await new Promise(r => setTimeout(r, RATE_LIMIT_RETRY_DELAY_MS));
-            gptResult = await runGptCall(); // retry once — if this throws, it propagates
-          } else {
-            throw err;
+        // First attempt + escalating rate-limit retries (30s, 60s, 120s)
+        for (let attempt = 0; attempt <= RATE_LIMIT_RETRY_DELAYS.length; attempt++) {
+          try {
+            gptResult = await runGptCall();
+            break;
+          } catch (err) {
+            const isRateLimit = err.message?.includes('429') || err.message?.toLowerCase().includes('rate limit');
+            if (isRateLimit && attempt < RATE_LIMIT_RETRY_DELAYS.length) {
+              const delay = RATE_LIMIT_RETRY_DELAYS[attempt];
+              console.log(`⏳ Rate limited on ${ev.file_name}. Waiting ${delay / 1000}s before retry ${attempt + 1}/${RATE_LIMIT_RETRY_DELAYS.length}...`);
+              await new Promise(r => setTimeout(r, delay));
+            } else {
+              throw err;
+            }
           }
         }
 
@@ -1273,6 +1279,12 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       const batchResults = await Promise.all(batchPromises);
       for (const pairResults of batchResults) {
         results.push(...pairResults);
+      }
+
+      // Inter-batch delay to avoid rate limits (configurable via GPT_CALL_DELAY_MS)
+      if (GPT_CALL_DELAY_MS > 0 && batchStart + GPT_CONCURRENCY < allParsedEvidence.length) {
+        console.log(`⏳ Waiting ${GPT_CALL_DELAY_MS}ms before next batch...`);
+        await new Promise(r => setTimeout(r, GPT_CALL_DELAY_MS));
       }
     }
 
