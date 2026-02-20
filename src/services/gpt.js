@@ -959,4 +959,47 @@ async function enhanceFrameworkControls(controls, context = {}) {
   }
 }
 
-module.exports = { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, SYSTEM_PROMPT };
+/**
+ * Analyze image evidence against multiple controls in one GPT call.
+ * Uses the shared OpenAI client (replaces inline client instantiation in analyze-all).
+ *
+ * @param {string} imageBase64 - Base64-encoded image data
+ * @param {string} mimeType - Image MIME type (e.g., 'image/png')
+ * @param {string} userPromptText - The full multi-control analysis prompt text
+ * @returns {{ analysis, model, usage, finish_reason }}
+ */
+async function analyzeImageEvidenceMultiControl(imageBase64, mimeType, userPromptText) {
+  const contentParts = [
+    { type: 'text', text: userPromptText },
+    { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}`, detail: 'high' } },
+  ];
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: GPT_MODEL,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: contentParts },
+      ],
+      temperature: GPT_TEMPERATURE,
+      max_tokens: GPT_MAX_TOKENS,
+      response_format: { type: 'json_object' },
+    });
+
+    const choice = response.choices[0];
+    let analysis;
+    try {
+      analysis = JSON.parse(choice.message.content);
+    } catch (e) {
+      throw new Error('GPT returned invalid JSON for multi-control image evidence');
+    }
+    analysis.status = analysis.overall_status || analysis.status || 'non_compliant';
+    analysis.controls = Array.isArray(analysis.controls) ? analysis.controls : [];
+
+    return { analysis, model: response.model, usage: response.usage, finish_reason: choice.finish_reason };
+  } catch (err) {
+    handleOpenAIError(err);
+  }
+}
+
+module.exports = { analyzeEvidence, analyzeImageEvidence, analyzeImageEvidenceMultiControl, normalizeGptAnalysis, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, SYSTEM_PROMPT };
