@@ -1059,29 +1059,6 @@ router.post('/group-by-ids/:evidenceId', async (req, res) => {
 // All evidence from parent + all child requirements → one GPT call
 // ══════════════════════════════════════════════════════════════════════════════
 
-// ── Rate-limit retry helper for analyze-all GPT calls ──
-const RATE_LIMIT_RETRY_DELAYS = [30_000, 60_000, 120_000]; // 30s, 60s, 120s
-
-async function callGptWithRetry(gptCallFn) {
-  for (let attempt = 0; attempt <= RATE_LIMIT_RETRY_DELAYS.length; attempt++) {
-    try {
-      return await gptCallFn();
-    } catch (err) {
-      const isRateLimit = err.status === 429
-        || err.message?.includes('429')
-        || err.message?.toLowerCase().includes('rate limit');
-
-      if (isRateLimit && attempt < RATE_LIMIT_RETRY_DELAYS.length) {
-        const delay = RATE_LIMIT_RETRY_DELAYS[attempt];
-        console.log(`⏳ [Analyze-all] Rate limited. Retry ${attempt + 1}/${RATE_LIMIT_RETRY_DELAYS.length} in ${delay / 1000}s...`);
-        await new Promise(r => setTimeout(r, delay));
-      } else {
-        throw err;
-      }
-    }
-  }
-}
-
 // POST /api/analyze/analyze-all/:parentControlId — Validate all controls in a category at once
 //
 // Supports TWO modes:
@@ -1290,20 +1267,18 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       console.log(`🤖 Sending ${totalEvidenceCount} evidence (${parsedDocs.length} text + ${parsedImages.length} images) + ${controlsToAnalyze.length} controls to GPT-4o vision...`);
 
       const OpenAI = require('openai');
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 0 });
 
-      const response = await callGptWithRetry(() =>
-        openai.chat.completions.create({
-          model: 'gpt-4o',
-          messages: [
-            { role: 'system', content: SYSTEM_PROMPT },
-            { role: 'user', content: contentParts },
-          ],
-          temperature: 0.2,
-          max_tokens: 16384,
-          response_format: { type: 'json_object' },
-        })
-      );
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: contentParts },
+        ],
+        temperature: 0.2,
+        max_tokens: 16384,
+        response_format: { type: 'json_object' },
+      });
 
       const choice = response.choices[0];
       let analysis;
@@ -1321,9 +1296,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       // ── TEXT-ONLY: existing path ──
       const userPromptOverride = buildAnalyzeAllPrompt(combinedText, controlsList, customInstructions, documentNames);
       console.log(`🤖 Sending ${parsedDocs.length} docs + ${controlsToAnalyze.length} controls to GPT...`);
-      gptResult = await callGptWithRetry(() =>
-        analyzeEvidence(combinedText, 'multiple controls', parentControl.title, customInstructions, { userPromptOverride })
-      );
+      gptResult = await analyzeEvidence(combinedText, 'multiple controls', parentControl.title, customInstructions, { userPromptOverride });
     }
 
     // 10. Parse per-control results from GPT response
@@ -1462,7 +1435,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
 
     res.status(isRateLimit ? 429 : 500).json({
       error: isRateLimit
-        ? 'OpenAI rate limit exceeded after retries. Please wait a few minutes and try again.'
+        ? 'OpenAI rate limit exceeded. Please wait a minute and try again.'
         : 'Analyze-all failed',
       details: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
