@@ -448,7 +448,31 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       return res.status(400).json({ error: 'Evidence record not found for this analysis' });
     }
 
-    // 2. Each analysis_id maps to exactly 1 evidence file (per-pair model, v2.0+)
+    // 2. Find all sibling analyses for the same control (enables evidence tab switching)
+    const { data: siblingAnalyses } = await supabase
+      .from('analysis_results')
+      .select('id, evidence:evidence_id (id, file_name, file_type), status, compliance_percentage, analyzed_at')
+      .eq('control_id', analysis.control_id)
+      .order('analyzed_at', { ascending: false });
+
+    // Deduplicate to latest analysis per evidence file
+    const latestByEvidence = new Map();
+    for (const s of (siblingAnalyses || [])) {
+      if (s.evidence && !latestByEvidence.has(s.evidence.id)) {
+        latestByEvidence.set(s.evidence.id, s);
+      }
+    }
+
+    const evidenceSources = Array.from(latestByEvidence.values()).map(s => ({
+      id: s.evidence.id,
+      fileName: s.evidence.file_name,
+      fileType: s.evidence.file_type,
+      analysisId: s.id,
+      status: s.status,
+      compliancePercentage: s.compliance_percentage,
+    }));
+
+    // 3. Each analysis_id maps to exactly 1 evidence file (per-pair model, v2.0+)
     const activeEvidence = defaultEvidence;
     const filePath = activeEvidence.file_path;
     if (!filePath) {
@@ -496,6 +520,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
           findings: responseFindings,
           diff_data: responseDiffData,
         },
+        evidenceSources,
         evidence: {
           id: activeEvidence.id,
           fileName: activeEvidence.file_name,
@@ -587,6 +612,7 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
         findings: responseFindings,
         diff_data: responseDiffData,
       },
+      evidenceSources,
       evidence: {
         id: activeEvidence.id,
         fileName: activeEvidence.file_name,
