@@ -4,6 +4,7 @@ const express = require('express');
 const cors = require('cors');
 const analyzeRoutes = require('./routes/analyze');
 const frameworkRoutes = require('./routes/framework');
+const crosswalkRoutes = require('./routes/crosswalk');
 const { testConnection } = require('./utils/supabase');
 
 // ── Validate required environment variables ──
@@ -64,6 +65,7 @@ app.get('/health', (req, res) => {
 // Mount routes
 app.use('/api/analyze', analyzeRoutes);
 app.use('/api/framework', frameworkRoutes);
+app.use('/api/crosswalk', crosswalkRoutes);
 
 // Global error handler (includes multer errors)
 app.use((err, req, res, next) => {
@@ -113,7 +115,8 @@ async function start() {
     console.log(`📋 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`🔗 Health check: http://localhost:${PORT}/health`);
     console.log(`📡 Analyze API: http://localhost:${PORT}/api/analyze`);
-    console.log(`📡 Framework API: http://localhost:${PORT}/api/framework\n`);
+    console.log(`📡 Framework API: http://localhost:${PORT}/api/framework`);
+    console.log(`📡 Crosswalk API: http://localhost:${PORT}/api/crosswalk\n`);
   });
 
   // Graceful shutdown
