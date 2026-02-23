@@ -6,6 +6,7 @@ const router = express.Router();
 const { upload } = require('../middleware/upload');
 const { enhanceFrameworkControls } = require('../services/gpt');
 const { createJobStore } = require('../utils/analysisHelpers');
+const { supabase } = require('../utils/supabase');
 
 // ── In-memory job store for async processing ──
 // Worker threads run in separate V8 heaps, so if they OOM the main process
@@ -15,6 +16,58 @@ const jobs = createJobStore({ processingTimeoutMs: 20 * 60 * 1000 });
 // ── Constants ──
 const ENHANCE_BATCH_SIZE = 100;
 const MAX_CONTROLS_FOR_ENHANCEMENT = 500;
+
+// ── GET /api/framework — List all frameworks with control counts ──
+router.get('/', async (req, res) => {
+  try {
+    const { data: frameworks, error } = await supabase
+      .from('frameworks')
+      .select('id, name, created_at')
+      .order('name', { ascending: true });
+
+    if (error) {
+      return res.status(500).json({ error: 'Failed to fetch frameworks.', details: error.message });
+    }
+
+    // Attach control count to each framework
+    const frameworksWithCounts = await Promise.all(
+      (frameworks || []).map(async (fw) => {
+        const { count } = await supabase
+          .from('controls')
+          .select('id', { count: 'exact', head: true })
+          .eq('framework_id', fw.id);
+        return { ...fw, control_count: count || 0 };
+      })
+    );
+
+    return res.json({ success: true, data: frameworksWithCounts });
+  } catch (err) {
+    console.error('❌ List frameworks error:', err.message);
+    res.status(500).json({ error: 'Failed to list frameworks.', details: err.message });
+  }
+});
+
+// ── GET /api/framework/:frameworkId/controls — List controls for a framework ──
+router.get('/:frameworkId/controls', async (req, res) => {
+  try {
+    const { frameworkId } = req.params;
+
+    const { data: controls, error } = await supabase
+      .from('controls')
+      .select('id, control_number, title, description, category')
+      .eq('framework_id', frameworkId)
+      .order('sort_order', { ascending: true });
+
+    if (error) {
+      return res.status(500).json({ error: 'Failed to fetch controls.', details: error.message });
+    }
+
+    return res.json({ success: true, data: controls || [] });
+  } catch (err) {
+    console.error('❌ List controls error:', err.message);
+    res.status(500).json({ error: 'Failed to list controls.', details: err.message });
+  }
+});
 
 // ── POST /api/framework/parse — Start async processing in worker thread ──
 router.post('/parse', upload.single('file'), async (req, res) => {
