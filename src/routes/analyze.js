@@ -1463,13 +1463,43 @@ router.post('/consolidate/:parentControlId', async (req, res) => {
 
     console.log(`✅ Consolidation complete — ${uniqueDocs.size} documents, ${uniqueControls.size} controls`);
 
+    // 8. Save to consolidated_analyses (upsert — one per control+project)
+    const upsertRecord = {
+      parent_control_id: parentControlId,
+      project_id: projectId || null,
+      overall_status: consolidation.result.overall_status || 'partial',
+      overall_compliance_percentage: consolidation.result.overall_compliance_percentage || 0,
+      consolidated_data: consolidation.result,
+      source_analyses_count: dedupedResults.length,
+      controls_covered: uniqueControls.size,
+      documents_referenced: uniqueDocs.size,
+      model_used: consolidation.model || 'gpt-5.1',
+      tokens_used: consolidation.usage || {},
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data: savedRecord, error: saveError } = await supabase
+      .from('consolidated_analyses')
+      .upsert(upsertRecord, { onConflict: 'parent_control_id,project_id' })
+      .select()
+      .single();
+
+    if (saveError) {
+      console.warn('⚠️ Failed to save consolidation (returning result anyway):', saveError.message);
+    } else {
+      console.log(`💾 Saved consolidation: ${savedRecord.id}`);
+    }
+
     return res.json({
       success: true,
       data: {
+        id: savedRecord?.id || null,
         consolidated: consolidation.result,
         source_analyses_count: dedupedResults.length,
         controls_covered: uniqueControls.size,
         documents_referenced: uniqueDocs.size,
+        created_at: savedRecord?.created_at || null,
+        updated_at: savedRecord?.updated_at || null,
         metadata: {
           model: consolidation.model || 'gpt-5.1',
           tokens_used: consolidation.usage || {},
@@ -1493,5 +1523,53 @@ router.post('/consolidate/:parentControlId', async (req, res) => {
   }
 });
 
-module.exports = router;
+// ── GET /api/analyze/consolidate/:parentControlId — Retrieve saved consolidation ──
+router.get('/consolidate/:parentControlId', async (req, res) => {
+  try {
+    const { parentControlId } = req.params;
+    const { projectId } = req.query;
 
+    let query = supabase
+      .from('consolidated_analyses')
+      .select('*')
+      .eq('parent_control_id', parentControlId);
+
+    if (projectId) {
+      query = query.eq('project_id', projectId);
+    } else {
+      query = query.is('project_id', null);
+    }
+
+    const { data: record, error } = await query.maybeSingle();
+
+    if (error) {
+      return res.status(500).json({ error: 'Failed to fetch consolidation', details: error.message });
+    }
+
+    if (!record) {
+      return res.json({ success: true, data: null });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: record.id,
+        consolidated: record.consolidated_data,
+        source_analyses_count: record.source_analyses_count,
+        controls_covered: record.controls_covered,
+        documents_referenced: record.documents_referenced,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        metadata: {
+          model: record.model_used,
+          tokens_used: record.tokens_used,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('❌ Fetch consolidation error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch consolidation' });
+  }
+});
+
+module.exports = router;
