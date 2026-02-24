@@ -1175,7 +1175,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
               { role: 'user', content: contentParts },
             ],
             temperature: 0.2,
-            max_tokens: 16384,
+            max_completion_tokens: 16384,
             response_format: { type: 'json_object' },
           });
 

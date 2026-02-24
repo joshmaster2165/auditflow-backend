@@ -305,7 +305,7 @@ async function analyzeEvidence(documentText, requirementText, controlName, custo
         { role: 'user', content: userPromptOverride || buildUserPrompt(documentText, requirementText, controlName, customInstructions) },
       ],
       temperature: GPT_TEMPERATURE,
-      max_tokens: GPT_MAX_TOKENS,
+      max_completion_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
 
@@ -461,7 +461,7 @@ async function analyzeImageEvidence(imageBase64, mimeType, requirementText, cont
         },
       ],
       temperature: GPT_TEMPERATURE,
-      max_tokens: GPT_MAX_TOKENS,
+      max_completion_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
 
@@ -592,7 +592,7 @@ async function extractFrameworkControls(documentText, context = {}) {
         { role: 'user', content: buildFrameworkExtractionPrompt(documentText, context) },
       ],
       temperature: GPT_EXTRACTION_TEMPERATURE,
-      max_tokens: GPT_MAX_TOKENS,
+      max_completion_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
 
@@ -775,7 +775,7 @@ async function extractControlsFromTabular(textData, context = {}) {
         { role: 'user', content: buildTabularExtractionPrompt(textData, context) },
       ],
       temperature: GPT_EXTRACTION_TEMPERATURE,
-      max_tokens: GPT_MAX_TOKENS,
+      max_completion_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
 
@@ -927,7 +927,7 @@ async function enhanceFrameworkControls(controls, context = {}) {
         { role: 'user', content: buildEnhancePrompt(controls, context) },
       ],
       temperature: GPT_TEMPERATURE,
-      max_tokens: GPT_MAX_TOKENS,
+      max_completion_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
 

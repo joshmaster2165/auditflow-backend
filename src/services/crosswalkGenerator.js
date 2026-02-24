@@ -154,7 +154,7 @@ async function processCrosswalkBatch(sourceControlsBatch, targetIndex, sourceFra
         { role: 'user', content: userPrompt },
       ],
       temperature: GPT_TEMPERATURE,
-      max_tokens: GPT_MAX_TOKENS,
+      max_completion_tokens: GPT_MAX_TOKENS,
       response_format: { type: 'json_object' },
     });
   };
