@@ -5,7 +5,7 @@ const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/
 const fs = require('fs');
 const { parseDocument, parseDocumentForViewer, isImageType } = require('../services/documentParser');
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
-const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, SYSTEM_PROMPT } = require('../services/gpt');
+const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, consolidateAnalyses, SYSTEM_PROMPT } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore } = require('../utils/analysisHelpers');
@@ -1348,6 +1348,148 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     });
   } finally {
     tempFiles.forEach(f => cleanupFile(f));
+  }
+});
+
+// ── POST /api/analyze/consolidate/:parentControlId — Consolidate M×N analyses into one report ──
+router.post('/consolidate/:parentControlId', async (req, res) => {
+  req.setTimeout(120000);
+  res.setTimeout(120000);
+
+  try {
+    const { parentControlId } = req.params;
+    const { controlIds: explicitIds, projectId } = req.body || {};
+
+    console.log(`\n🔗 Starting CONSOLIDATION for control: ${parentControlId}`);
+
+    // 1. Fetch the parent control
+    const { data: parentControl, error: parentError } = await supabase
+      .from('controls')
+      .select('*, frameworks:framework_id (*)')
+      .eq('id', parentControlId)
+      .single();
+
+    if (parentError || !parentControl) {
+      return res.status(404).json({ error: 'Control not found', details: parentError?.message });
+    }
+
+    // 2. Determine which controls to consolidate
+    let controlIds = [];
+
+    if (explicitIds && Array.isArray(explicitIds) && explicitIds.length > 0) {
+      controlIds = explicitIds;
+    } else {
+      // Use same child-discovery as analyze-all
+      const { childControls } = await findChildControls(parentControl);
+      if (childControls && childControls.length > 0) {
+        controlIds = childControls.map(c => c.id);
+      } else if (parentControl.category) {
+        const { data: categoryControls } = await supabase
+          .from('controls')
+          .select('id')
+          .eq('framework_id', parentControl.framework_id)
+          .eq('category', parentControl.category)
+          .neq('id', parentControlId);
+        if (categoryControls) {
+          controlIds = categoryControls.map(c => c.id);
+        }
+      }
+    }
+
+    // Include the parent itself if no children found
+    if (controlIds.length === 0) {
+      controlIds = [parentControlId];
+    }
+
+    // 3. Fetch all analysis_results for these controls
+    let query = supabase
+      .from('analysis_results')
+      .select('*, evidence:evidence_id (id, file_name, original_name), control:control_id (id, control_number, title)')
+      .in('control_id', controlIds)
+      .not('status', 'eq', 'error')
+      .not('status', 'eq', 'pending')
+      .order('analyzed_at', { ascending: false });
+
+    if (projectId) {
+      query = query.eq('project_id', projectId);
+    }
+
+    const { data: allResults, error: resultsError } = await query;
+
+    if (resultsError) {
+      return res.status(500).json({ error: 'Failed to fetch analysis results', details: resultsError.message });
+    }
+
+    if (!allResults || allResults.length === 0) {
+      return res.status(400).json({
+        error: 'No analyses found to consolidate. Run evidence analysis first.',
+      });
+    }
+
+    // 4. Deduplicate — keep latest per (evidence_id, control_id) pair
+    const seen = new Map();
+    for (const r of allResults) {
+      const key = `${r.evidence_id}::${r.control_id}`;
+      if (!seen.has(key)) {
+        seen.set(key, r);
+      }
+    }
+    const dedupedResults = Array.from(seen.values());
+
+    console.log(`📊 Found ${dedupedResults.length} unique analyses to consolidate`);
+
+    // 5. Build condensed input for GPT
+    const condensed = dedupedResults.map(r => ({
+      control_number: r.control?.control_number || 'N/A',
+      control_title: r.control?.title || 'Untitled',
+      evidence_name: r.evidence?.original_name || r.evidence?.file_name || 'Unknown document',
+      status: r.status,
+      compliance_percentage: r.compliance_percentage || 0,
+      summary: r.summary || '',
+      critical_gaps: r.findings?.critical_gaps || [],
+      recommendations: r.recommendations || [],
+    }));
+
+    // 6. Call GPT consolidation
+    const consolidation = await consolidateAnalyses(condensed, {
+      control_number: parentControl.control_number,
+      title: parentControl.title,
+      description: parentControl.description,
+    });
+
+    // 7. Collect unique document names and control count
+    const uniqueDocs = new Set(condensed.map(c => c.evidence_name));
+    const uniqueControls = new Set(condensed.map(c => c.control_number));
+
+    console.log(`✅ Consolidation complete — ${uniqueDocs.size} documents, ${uniqueControls.size} controls`);
+
+    return res.json({
+      success: true,
+      data: {
+        consolidated: consolidation.result,
+        source_analyses_count: dedupedResults.length,
+        controls_covered: uniqueControls.size,
+        documents_referenced: uniqueDocs.size,
+        metadata: {
+          model: consolidation.model || 'gpt-5.1',
+          tokens_used: consolidation.usage || {},
+          truncated: consolidation.truncated || false,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('❌ Consolidation error:', err.message);
+
+    const isRateLimit = err.status === 429
+      || err.message?.includes('429')
+      || err.message?.toLowerCase().includes('rate limit');
+
+    res.status(isRateLimit ? 429 : 500).json({
+      error: isRateLimit
+        ? 'OpenAI rate limit exceeded. Please wait a minute and try again.'
+        : 'Consolidation failed',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
   }
 });
 

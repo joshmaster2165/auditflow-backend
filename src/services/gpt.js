@@ -959,4 +959,117 @@ async function enhanceFrameworkControls(controls, context = {}) {
   }
 }
 
-module.exports = { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, SYSTEM_PROMPT };
+// ─────────────────────────────────────────────────────────────
+// Consolidated Analysis — unify M×N evidence results into one report
+// ─────────────────────────────────────────────────────────────
+
+const CONSOLIDATION_SYSTEM_PROMPT = `You are a senior compliance auditor producing a consolidated analysis report. You will receive individual evidence-vs-control analysis results from multiple documents and controls.
+
+Your job is to synthesize ALL individual analyses into ONE unified report that:
+1. Provides an overall compliance status and percentage across all controls and evidence
+2. Summarizes key findings, citing specific document names as references
+3. Lists which documents contribute evidence to which controls
+4. Identifies gaps that persist across all available evidence
+5. Provides prioritized, actionable recommendations
+
+Rules:
+- Always reference documents by their exact filename
+- If multiple documents address the same control, note the strongest evidence source
+- Do NOT invent findings — only consolidate what the individual analyses found
+- Be concise but thorough
+
+You must respond with valid JSON only.`;
+
+function buildConsolidationPrompt(analyses, controlContext) {
+  let prompt = `## Parent Control\n`;
+  prompt += `Control: ${controlContext.control_number || 'N/A'} — ${controlContext.title || 'Untitled'}\n`;
+  if (controlContext.description) {
+    prompt += `Description: ${controlContext.description}\n`;
+  }
+
+  prompt += `\n## Individual Analysis Results (${analyses.length} total)\n\n`;
+
+  for (const a of analyses) {
+    prompt += `### ${a.control_number} — ${a.control_title}\n`;
+    prompt += `- Document: ${a.evidence_name}\n`;
+    prompt += `- Status: ${a.status} | Compliance: ${a.compliance_percentage}%\n`;
+    prompt += `- Summary: ${a.summary || 'No summary'}\n`;
+    if (a.critical_gaps && a.critical_gaps.length > 0) {
+      prompt += `- Gaps: ${a.critical_gaps.join('; ')}\n`;
+    }
+    if (a.recommendations && a.recommendations.length > 0) {
+      prompt += `- Recommendations: ${a.recommendations.join('; ')}\n`;
+    }
+    prompt += `\n`;
+  }
+
+  prompt += `## Return JSON with this exact structure:
+{
+  "overall_status": "compliant" | "partial" | "non_compliant",
+  "overall_compliance_percentage": <0-100>,
+  "consolidated_summary": "<2-4 sentence executive summary referencing key documents>",
+  "document_coverage": [
+    {
+      "document_name": "<exact filename>",
+      "relevance": "high" | "medium" | "low",
+      "controls_addressed": ["<control numbers>"],
+      "key_findings": "<1-2 sentence summary of what this document evidences>"
+    }
+  ],
+  "consolidated_gaps": ["<gap description referencing which controls are affected>"],
+  "consolidated_recommendations": ["<actionable recommendation>"],
+  "per_control_summary": [
+    {
+      "control_number": "<number>",
+      "control_title": "<title>",
+      "status": "compliant" | "partial" | "non_compliant",
+      "compliance_percentage": <0-100>,
+      "evidence_documents": ["<filenames that provided evidence>"],
+      "key_finding": "<1 sentence>"
+    }
+  ]
+}`;
+
+  return prompt;
+}
+
+async function consolidateAnalyses(analyses, controlContext) {
+  console.log(`🔗 Consolidating ${analyses.length} analysis results...`);
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: GPT_MODEL,
+      messages: [
+        { role: 'system', content: CONSOLIDATION_SYSTEM_PROMPT },
+        { role: 'user', content: buildConsolidationPrompt(analyses, controlContext) },
+      ],
+      temperature: GPT_TEMPERATURE,
+      max_completion_tokens: GPT_MAX_TOKENS,
+      response_format: { type: 'json_object' },
+    });
+
+    const choice = response.choices[0];
+    let result;
+
+    try {
+      result = JSON.parse(choice.message.content);
+    } catch (parseErr) {
+      console.error('❌ Failed to parse GPT consolidation response as JSON');
+      throw new Error('GPT returned invalid JSON response during consolidation');
+    }
+
+    console.log(`✅ Consolidation complete — overall: ${result.overall_status} (${result.overall_compliance_percentage}%)`);
+
+    return {
+      result,
+      model: response.model,
+      usage: response.usage,
+      finish_reason: choice.finish_reason,
+      truncated: choice.finish_reason === 'length',
+    };
+  } catch (err) {
+    handleOpenAIError(err);
+  }
+}
+
+module.exports = { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, consolidateAnalyses, SYSTEM_PROMPT };
