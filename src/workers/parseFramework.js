@@ -248,7 +248,7 @@ async function run() {
       categoriesFound,
       extractionNotes,
       metadata: {
-        model: 'gpt-4o',
+        model: 'gpt-5.1',
         tokensUsed: totalUsage,
         chunked,
         chunkCount,

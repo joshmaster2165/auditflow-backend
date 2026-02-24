@@ -4,7 +4,7 @@ const { supabase } = require('../utils/supabase');
 // ── OpenAI Client & Configuration ──
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const GPT_MODEL = 'gpt-4o';
+const GPT_MODEL = 'gpt-5.1';
 const GPT_MAX_TOKENS = 16384;
 const GPT_TEMPERATURE = 0.2;
 const BATCH_SIZE = 12;

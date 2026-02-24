@@ -15,7 +15,7 @@ function buildAnalysisRecord({ evidenceId, controlId, projectId, gptResult, diff
     project_id: projectId || null,
     analyzed_at: new Date().toISOString(),
     analysis_version: version,
-    model_used: gptResult.model || 'gpt-4o',
+    model_used: gptResult.model || 'gpt-5.1',
     status: gptResult.analysis.status,
     confidence_score: gptResult.analysis.confidence_score,
     compliance_percentage: gptResult.analysis.compliance_percentage,

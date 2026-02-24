@@ -147,7 +147,7 @@ router.post('/evidence/:evidenceId', async (req, res) => {
       project_id: evidence.project_id || null,
       analyzed_at: new Date().toISOString(),
       analysis_version: 'v1.0',
-      model_used: gptResult.model || 'gpt-4o',
+      model_used: gptResult.model || 'gpt-5.1',
       status: gptResult.analysis.status,
       confidence_score: gptResult.analysis.confidence_score,
       compliance_percentage: gptResult.analysis.compliance_percentage,
@@ -1169,7 +1169,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
           const OpenAI = require('openai');
           const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 0 });
           const response = await openai.chat.completions.create({
-            model: 'gpt-4o',
+            model: 'gpt-5.1',
             messages: [
               { role: 'system', content: SYSTEM_PROMPT },
               { role: 'user', content: contentParts },
@@ -1250,7 +1250,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
             project_id: projectId,
             analyzed_at: new Date().toISOString(),
             analysis_version: 'v2.0-pair',
-            model_used: gptResult.model || 'gpt-4o',
+            model_used: gptResult.model || 'gpt-5.1',
             status: controlAnalysis.status,
             confidence_score: controlAnalysis.confidence_score,
             compliance_percentage: controlAnalysis.compliance_percentage,
@@ -1326,7 +1326,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         summary: '',
       },
       metadata: {
-        model: 'gpt-4o',
+        model: 'gpt-5.1',
         tokens_used: totalUsage,
         analyzed_at: new Date().toISOString(),
         documents_analyzed: allParsedEvidence.length,

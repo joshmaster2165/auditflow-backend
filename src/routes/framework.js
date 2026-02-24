@@ -263,7 +263,7 @@ router.post('/enhance', async (req, res) => {
         controls: normalizedControls,
         summary: totalSummary,
         metadata: {
-          model: 'gpt-4o',
+          model: 'gpt-5.1',
           tokensUsed: totalUsage,
         },
       },

@@ -5,7 +5,7 @@ const openai = new OpenAI({
 });
 
 // ── GPT Configuration Constants ──
-const GPT_MODEL = 'gpt-4o';
+const GPT_MODEL = 'gpt-5.1';
 const GPT_MAX_TOKENS = 16384;
 const GPT_TEMPERATURE = 0.2;
 const GPT_EXTRACTION_TEMPERATURE = 0.1;
