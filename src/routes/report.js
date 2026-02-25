@@ -6,6 +6,7 @@ const { createJobStore } = require('../utils/analysisHelpers');
 const {
   buildDefaultSections,
   mapScoreToScale,
+  gatherReportData,
   runReportGeneration,
   generateSectionContent,
   generateReportHtml,
@@ -356,8 +357,7 @@ router.post('/:reportId/regenerate-section/:sectionId', async (req, res) => {
       return res.status(400).json({ error: 'This section is not AI-generated and cannot be regenerated' });
     }
 
-    // Need to re-gather data (or use existing snapshot)
-    const { gatherReportData } = require('../services/reportGenerator');
+    // Use existing snapshot if available, otherwise re-gather
     const reportData = report.control_findings.length > 0
       ? { framework: { name: report.framework_name || '' }, controlFindings: report.control_findings, evidenceManifest: report.evidence_manifest, reportType: report.report_type }
       : await gatherReportData(report.project_id, report.framework_id);

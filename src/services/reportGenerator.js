@@ -115,7 +115,7 @@ async function gatherReportData(projectId, frameworkId) {
   // 2. Fetch controls
   const { data: controls } = await supabase
     .from('controls')
-    .select('id, control_number, title, description, category, sort_order, parent_control_number, "group"')
+    .select('*')
     .eq('framework_id', frameworkId)
     .order('sort_order', { ascending: true });
 
@@ -126,7 +126,7 @@ async function gatherReportData(projectId, frameworkId) {
   // 3. Fetch analysis results (dedup latest per control+evidence pair)
   const { data: allResults } = await supabase
     .from('analysis_results')
-    .select('*, evidence:evidence_id (id, file_name, file_type, uploaded_at, storage_path)')
+    .select('*, evidence:evidence_id (id, file_name, file_type, created_at)')
     .in('control_id', controlIds)
     .eq('project_id', projectId)
     .not('status', 'eq', 'error')
@@ -157,8 +157,7 @@ async function gatherReportData(projectId, frameworkId) {
         evidence_id: eid,
         file_name: r.evidence.file_name,
         file_type: r.evidence.file_type,
-        storage_path: r.evidence.storage_path || '',
-        uploaded_at: r.evidence.uploaded_at,
+        created_at: r.evidence.created_at,
         controls_analyzed: [],
         analysis_count: 0,
       });
@@ -211,7 +210,6 @@ async function gatherReportData(projectId, frameworkId) {
           evidence_id: r.evidence.id,
           name: r.evidence.file_name,
           type: r.evidence.file_type,
-          storage_path: r.evidence.storage_path || '',
         });
       }
     }
