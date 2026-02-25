@@ -14,36 +14,44 @@ const {
   BorderStyle,
   ShadingType,
   PageBreak,
+  SectionType,
+  VerticalAlign,
 } = require('docx');
 
 // ─────────────────────────────────────────────────────────────
-// Default Section Templates — All user-written narratives
+// Default Section Templates — Enhanced with methodology, rating legend, grouping
 // ─────────────────────────────────────────────────────────────
 
 const DEFAULT_SECTIONS = {
   audit_compliance: [
-    { type: 'introduction', title: 'Introduction', order: 0, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
-    { type: 'scope', title: 'Scope', order: 1, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
-    { type: 'executive_summary', title: 'Executive Summary', order: 2, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
-    { type: 'scoring_summary', title: 'Scoring Summary', order: 3, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'control_findings', title: 'Control Findings', order: 4, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'testing_conducted', title: 'Testing Conducted', order: 5, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'introduction', title: 'Overview', order: 0, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'scope', title: 'Standards and Scope', order: 1, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'methodology', title: 'Methodology', order: 2, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'executive_summary', title: 'Executive Summary', order: 3, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'rating_legend', title: 'Classification of Audit Results', order: 4, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'scoring_summary', title: 'Scoring Summary', order: 5, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'control_findings', title: 'Detailed Analysis', order: 6, visible: true, content: null, editable: false, ai_generated: false, metadata: { grouped: true } },
+    { type: 'testing_conducted', title: 'Testing Conducted', order: 7, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
   ],
   readiness_gap: [
     { type: 'introduction', title: 'Introduction', order: 0, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
     { type: 'scope', title: 'Scope', order: 1, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
-    { type: 'executive_summary', title: 'Executive Summary', order: 2, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
-    { type: 'scoring_summary', title: 'Scoring Summary', order: 3, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'control_findings', title: 'Control Findings', order: 4, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'testing_conducted', title: 'Testing Conducted', order: 5, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'methodology', title: 'Methodology', order: 2, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'executive_summary', title: 'Executive Summary', order: 3, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'rating_legend', title: 'Rating Definitions', order: 4, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'scoring_summary', title: 'Scoring Summary', order: 5, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'control_findings', title: 'Control Findings', order: 6, visible: true, content: null, editable: false, ai_generated: false, metadata: { grouped: true } },
+    { type: 'testing_conducted', title: 'Testing Conducted', order: 7, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
   ],
   maturity: [
     { type: 'introduction', title: 'Introduction', order: 0, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
     { type: 'scope', title: 'Scope', order: 1, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
-    { type: 'executive_summary', title: 'Executive Summary', order: 2, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
-    { type: 'scoring_summary', title: 'Maturity Scoring Summary', order: 3, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'control_findings', title: 'Control Maturity Assessment', order: 4, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'testing_conducted', title: 'Testing Conducted', order: 5, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'methodology', title: 'Methodology', order: 2, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'executive_summary', title: 'Executive Summary', order: 3, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'rating_legend', title: 'Maturity Level Definitions', order: 4, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'scoring_summary', title: 'Maturity Scoring Summary', order: 5, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'control_findings', title: 'Control Maturity Assessment', order: 6, visible: true, content: null, editable: false, ai_generated: false, metadata: { grouped: true } },
+    { type: 'testing_conducted', title: 'Testing Conducted', order: 7, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
   ],
 };
 
@@ -226,10 +234,8 @@ async function gatherReportData(projectId, frameworkId) {
     let conciseRemediation = '';
 
     if (conData) {
-      // Use consolidated_summary as the main finding
       conciseFinding = conData.consolidated_summary || '';
 
-      // Per-control key_finding if available — append for richer context
       if (conData.per_control_summary && conData.per_control_summary.length > 0) {
         const keyFindings = conData.per_control_summary
           .map(pcs => pcs.key_finding)
@@ -239,15 +245,12 @@ async function gatherReportData(projectId, frameworkId) {
         }
       }
 
-      // Consolidated gaps
       const gaps = conData.consolidated_gaps || [];
       conciseGap = gaps.join('; ');
 
-      // Consolidated recommendations
       const recs = conData.consolidated_recommendations || [];
       conciseRemediation = recs.join('; ');
     } else if (resultsForControl.length > 0) {
-      // Fallback to raw analysis results
       const summaries = resultsForControl.map(r => r.summary).filter(Boolean);
       conciseFinding = summaries.join(' ').substring(0, 500);
 
@@ -293,7 +296,6 @@ async function gatherReportData(projectId, frameworkId) {
 async function generateReport(reportId) {
   const startTime = Date.now();
 
-  // 1. Fetch report
   const { data: report, error: fetchErr } = await supabase
     .from('reports')
     .select('*')
@@ -302,16 +304,13 @@ async function generateReport(reportId) {
 
   if (fetchErr || !report) throw new Error('Report not found');
 
-  // 2. Gather data from consolidated analyses + raw analysis fallback
   const reportData = await gatherReportData(report.project_id, report.framework_id);
 
-  // 3. Apply scoring config to all findings
   const scoredFindings = reportData.controlFindings.map(f => ({
     ...f,
     scoring_criteria: mapScoreToScale(f.compliance_score, report.scoring_config),
   }));
 
-  // 4. Update report — one save, done
   const durationMs = Date.now() - startTime;
 
   const { data: updated, error: updateErr } = await supabase
@@ -341,9 +340,9 @@ async function generateReport(reportId) {
   return updated;
 }
 
-// ─────────────────────────────────────────────────────────────
-// HTML Export — Clean table-focused export for PDF conversion
-// ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// HTML EXPORT
+// ═══════════════════════════════════════════════════════════════
 
 function escapeHtml(str) {
   if (!str) return '';
@@ -362,21 +361,23 @@ function reportTypeLabel(type) {
   return { audit_compliance: 'Audit Compliance Report', readiness_gap: 'Readiness & Gap Report', maturity: 'Maturity Assessment Report' }[type] || type;
 }
 
-function renderControlFindingsTable(findings, columnConfig) {
+// ── Inner table renderer (shared by flat and grouped) ──
+
+const COL_HEADERS = {
+  control_number: 'Control #',
+  title: 'Title',
+  evidence: 'Evidence',
+  findings: 'Finding',
+  gaps: 'Gap',
+  recommendations: 'Remediation',
+  score: 'Score',
+  status: 'Status',
+};
+
+function renderFindingsTableInner(findings, columnConfig) {
   const cols = columnConfig || ['control_number', 'title', 'evidence', 'findings', 'gaps', 'recommendations', 'score'];
 
-  const colHeaders = {
-    control_number: 'Control #',
-    title: 'Title',
-    evidence: 'Evidence',
-    findings: 'Finding',
-    gaps: 'Gap',
-    recommendations: 'Remediation',
-    score: 'Score',
-    status: 'Status',
-  };
-
-  const headerRow = cols.map(c => `<th>${colHeaders[c] || c}</th>`).join('');
+  const headerRow = cols.map(c => `<th>${COL_HEADERS[c] || c}</th>`).join('');
 
   const rows = findings.map(f => {
     const cells = cols.map(col => {
@@ -402,15 +403,109 @@ function renderControlFindingsTable(findings, columnConfig) {
     return `<tr>${cells}</tr>`;
   }).join('\n');
 
-  return `
-    <div class="section">
-      <h2>Control Findings</h2>
-      <table class="findings-table">
-        <thead><tr>${headerRow}</tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
+  return `<table class="findings-table">
+    <thead><tr>${headerRow}</tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
 }
+
+// ── Flat control findings table ──
+
+function renderControlFindingsTable(title, findings, columnConfig) {
+  if (!findings || findings.length === 0) {
+    return `<div class="section"><h2>${escapeHtml(title)}</h2><p>No control findings available.</p></div>`;
+  }
+  return `<div class="section">
+    <h2>${escapeHtml(title)}</h2>
+    ${renderFindingsTableInner(findings, columnConfig)}
+  </div>`;
+}
+
+// ── Grouped control findings (by category) ──
+
+function renderGroupedControlFindingsHtml(title, findings, columnConfig) {
+  if (!findings || findings.length === 0) {
+    return `<div class="section"><h2>${escapeHtml(title)}</h2><p>No control findings available.</p></div>`;
+  }
+
+  // Group by category preserving order of first appearance
+  const groups = new Map();
+  for (const f of findings) {
+    const cat = f.category || 'Uncategorized';
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(f);
+  }
+
+  let html = `<div class="section"><h2>${escapeHtml(title)}</h2>`;
+
+  for (const [category, categoryFindings] of groups) {
+    const compliantCount = categoryFindings.filter(f => (f.status_override || f.status) === 'compliant').length;
+    html += `<h3 class="category-header">${escapeHtml(category)}</h3>`;
+    html += `<p class="category-summary">${categoryFindings.length} control(s) — ${compliantCount} compliant</p>`;
+    html += renderFindingsTableInner(categoryFindings, columnConfig);
+  }
+
+  html += `</div>`;
+  return html;
+}
+
+// ── Rating legend ──
+
+function renderRatingLegendHtml(title, scoringConfig) {
+  const tierDescs = scoringConfig?.tier_descriptions;
+  let entries = [];
+
+  if (tierDescs && Object.keys(tierDescs).length > 0) {
+    entries = Object.entries(tierDescs);
+  } else {
+    // Fallback: build from thresholds
+    const thresholds = scoringConfig?.thresholds || {};
+    for (const [key, value] of Object.entries(thresholds)) {
+      entries.push([key, `Score threshold: ≥ ${value}%`]);
+    }
+  }
+
+  if (entries.length === 0) {
+    return `<div class="section"><h2>${escapeHtml(title)}</h2><p>No rating definitions configured.</p></div>`;
+  }
+
+  const rows = entries.map(([rating, description]) =>
+    `<tr><td><strong>${escapeHtml(rating)}</strong></td><td>${escapeHtml(description)}</td></tr>`
+  ).join('\n');
+
+  return `<div class="section">
+    <h2>${escapeHtml(title)}</h2>
+    <table class="findings-table">
+      <thead><tr><th style="width:25%">Classification</th><th>Description</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
+}
+
+// ── Custom table (user-defined columns + rows) ──
+
+function renderCustomTableHtml(section) {
+  const { columns, rows } = section.metadata || {};
+
+  if (!columns || !rows || rows.length === 0) {
+    return `<div class="section"><h2>${escapeHtml(section.title)}</h2><p>No data provided.</p></div>`;
+  }
+
+  const headerRow = columns.map(c => `<th>${escapeHtml(c)}</th>`).join('');
+  const dataRows = rows.map(row =>
+    `<tr>${row.map(cell => `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`
+  ).join('\n');
+
+  return `<div class="section">
+    <h2>${escapeHtml(section.title)}</h2>
+    <table class="findings-table">
+      <thead><tr>${headerRow}</tr></thead>
+      <tbody>${dataRows}</tbody>
+    </table>
+  </div>`;
+}
+
+// ── Testing conducted ──
 
 function renderTestingConducted(evidenceManifest) {
   if (!evidenceManifest || evidenceManifest.length === 0) {
@@ -427,16 +522,17 @@ function renderTestingConducted(evidenceManifest) {
     </tr>`;
   }).join('\n');
 
-  return `
-    <div class="section">
-      <h2>Testing Conducted</h2>
-      <p>The following ${evidenceManifest.length} evidence document(s) were analyzed:</p>
-      <table class="findings-table">
-        <thead><tr><th>Document</th><th>Type</th><th>Controls Analyzed</th><th>Analyses</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
+  return `<div class="section">
+    <h2>Testing Conducted</h2>
+    <p>The following ${evidenceManifest.length} evidence document(s) were analyzed:</p>
+    <table class="findings-table">
+      <thead><tr><th>Document</th><th>Type</th><th>Controls Analyzed</th><th>Analyses</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>`;
 }
+
+// ── Main HTML generator ──
 
 function generateReportHtml(report) {
   const visibleSections = (report.sections || []).filter(s => s.visible).sort((a, b) => a.order - b.order);
@@ -454,11 +550,18 @@ function generateReportHtml(report) {
     : 0;
 
   const sectionHtml = visibleSections.map(section => {
-    if (section.type === 'control_findings') return renderControlFindingsTable(findings, report.column_config);
-    if (section.type === 'testing_conducted') return renderTestingConducted(manifest);
-    if (section.type === 'scoring_summary') {
-      return `
-        <div class="section">
+    switch (section.type) {
+      case 'control_findings':
+        if (section.metadata?.grouped) {
+          return renderGroupedControlFindingsHtml(section.title, findings, report.column_config);
+        }
+        return renderControlFindingsTable(section.title, findings, report.column_config);
+
+      case 'testing_conducted':
+        return renderTestingConducted(manifest);
+
+      case 'scoring_summary':
+        return `<div class="section">
           <h2>${escapeHtml(section.title)}</h2>
           <div class="stats-grid">
             <div class="stat-card"><div class="stat-value">${avgScore}%</div><div class="stat-label">Overall Score</div></div>
@@ -468,13 +571,20 @@ function generateReportHtml(report) {
             <div class="stat-card"><div class="stat-value">${total}</div><div class="stat-label">Total Controls</div></div>
           </div>
         </div>`;
+
+      case 'rating_legend':
+        return renderRatingLegendHtml(section.title, report.scoring_config);
+
+      case 'custom_table':
+        return renderCustomTableHtml(section);
+
+      default:
+        // All narrative sections: introduction, scope, methodology, executive_summary, custom
+        return `<div class="section">
+          <h2>${escapeHtml(section.title)}</h2>
+          <div class="section-content">${section.content ? section.content.replace(/\n/g, '<br>') : '<em>No content</em>'}</div>
+        </div>`;
     }
-    // Text sections (introduction, scope, executive_summary)
-    return `
-      <div class="section">
-        <h2>${escapeHtml(section.title)}</h2>
-        <div class="section-content">${section.content ? section.content.replace(/\n/g, '<br>') : '<em>No content</em>'}</div>
-      </div>`;
   }).join('\n');
 
   return `<!DOCTYPE html>
@@ -494,6 +604,8 @@ function generateReportHtml(report) {
     .section { margin-bottom: 2rem; page-break-inside: avoid; }
     .section h2 { font-size: 1.25rem; color: #1a1a2e; border-bottom: 2px solid #e5e7eb; padding-bottom: 0.5rem; margin-bottom: 1rem; }
     .section-content { font-size: 0.95rem; color: #374151; }
+    .category-header { font-size: 1.1rem; color: #1a1a2e; margin-top: 1.5rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.3rem; }
+    .category-summary { font-size: 0.85rem; color: #6b7280; margin-bottom: 0.5rem; }
     .stats-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1rem; margin-top: 1rem; }
     .stat-card { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem; text-align: center; }
     .stat-value { font-size: 1.75rem; font-weight: 700; }
@@ -532,9 +644,9 @@ function generateReportHtml(report) {
 </html>`;
 }
 
-// ─────────────────────────────────────────────────────────────
-// DOCX Export — Proper Word document with tables
-// ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// DOCX EXPORT
+// ═══════════════════════════════════════════════════════════════
 
 const DARK_BLUE = '1a1a2e';
 const TABLE_HEADER_BG = '1a1a2e';
@@ -557,27 +669,16 @@ function docxCell(text, options = {}) {
   });
 }
 
+// ── Findings table (shared by flat and grouped) ──
+
 function buildFindingsDocxTable(findings, columnConfig) {
   const cols = columnConfig || ['control_number', 'title', 'evidence', 'findings', 'gaps', 'recommendations', 'score'];
 
-  const colHeaders = {
-    control_number: 'Control #',
-    title: 'Title',
-    evidence: 'Evidence',
-    findings: 'Finding',
-    gaps: 'Gap',
-    recommendations: 'Remediation',
-    score: 'Score',
-    status: 'Status',
-  };
-
-  // Header row
   const headerRow = new TableRow({
     tableHeader: true,
-    children: cols.map(c => docxHeaderCell(colHeaders[c] || c)),
+    children: cols.map(c => docxHeaderCell(COL_HEADERS[c] || c)),
   });
 
-  // Data rows
   const dataRows = findings.map((f, idx) => {
     const rowShading = idx % 2 === 1 ? TABLE_ALT_BG : undefined;
 
@@ -611,6 +712,109 @@ function buildFindingsDocxTable(findings, columnConfig) {
   });
 }
 
+// ── Grouped findings (returns array of elements) ──
+
+function buildGroupedFindingsDocxElements(findings, columnConfig) {
+  const elements = [];
+
+  const groups = new Map();
+  for (const f of findings) {
+    const cat = f.category || 'Uncategorized';
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(f);
+  }
+
+  for (const [category, categoryFindings] of groups) {
+    // Category sub-header
+    elements.push(new Paragraph({
+      heading: HeadingLevel.HEADING_2,
+      spacing: { before: 300, after: 100 },
+      children: [new TextRun({ text: category, bold: true, size: 24, font: 'Calibri', color: DARK_BLUE })],
+    }));
+
+    // Category summary
+    const compliantCount = categoryFindings.filter(f => (f.status_override || f.status) === 'compliant').length;
+    elements.push(new Paragraph({
+      spacing: { after: 100 },
+      children: [new TextRun({
+        text: `${categoryFindings.length} control(s) — ${compliantCount} compliant`,
+        size: 18, font: 'Calibri', color: '6b7280',
+      })],
+    }));
+
+    // Table for this category
+    elements.push(buildFindingsDocxTable(categoryFindings, columnConfig));
+
+    elements.push(new Paragraph({ children: [] })); // spacer
+  }
+
+  return elements;
+}
+
+// ── Rating legend DOCX table ──
+
+function buildRatingLegendDocxTable(scoringConfig) {
+  const tierDescs = scoringConfig?.tier_descriptions;
+  let entries = [];
+
+  if (tierDescs && Object.keys(tierDescs).length > 0) {
+    entries = Object.entries(tierDescs);
+  } else {
+    const thresholds = scoringConfig?.thresholds || {};
+    for (const [key, value] of Object.entries(thresholds)) {
+      entries.push([key, `Score threshold: ≥ ${value}%`]);
+    }
+  }
+
+  if (entries.length === 0) return null;
+
+  const headerRow = new TableRow({
+    tableHeader: true,
+    children: [docxHeaderCell('Classification'), docxHeaderCell('Description')],
+  });
+
+  const dataRows = entries.map(([rating, description], idx) => {
+    const shading = idx % 2 === 1 ? TABLE_ALT_BG : undefined;
+    return new TableRow({
+      children: [
+        docxCell(rating, { bold: true, shading }),
+        docxCell(description, { shading }),
+      ],
+    });
+  });
+
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [headerRow, ...dataRows],
+  });
+}
+
+// ── Custom table DOCX ──
+
+function buildCustomDocxTable(section) {
+  const { columns, rows } = section.metadata || {};
+  if (!columns || !rows || rows.length === 0) return null;
+
+  const headerRow = new TableRow({
+    tableHeader: true,
+    children: columns.map(col => docxHeaderCell(col)),
+  });
+
+  const dataRows = rows.map((row, idx) => {
+    const shading = idx % 2 === 1 ? TABLE_ALT_BG : undefined;
+    return new TableRow({
+      children: row.map(cell => docxCell(cell || '', { shading })),
+    });
+  });
+
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [headerRow, ...dataRows],
+  });
+}
+
+// ── Testing conducted DOCX table ──
+
 function buildTestingDocxTable(evidenceManifest) {
   const headerRow = new TableRow({
     tableHeader: true,
@@ -640,6 +844,67 @@ function buildTestingDocxTable(evidenceManifest) {
   });
 }
 
+// ── Cover page section ──
+
+function buildCoverPageSection(report) {
+  return {
+    properties: {
+      type: SectionType.NEXT_PAGE,
+    },
+    children: [
+      new Paragraph({ children: [] }),
+      new Paragraph({ children: [] }),
+      new Paragraph({ children: [] }),
+      new Paragraph({ children: [] }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 400 },
+        children: [new TextRun({ text: report.title, bold: true, size: 72, font: 'Calibri', color: DARK_BLUE })],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 200 },
+        children: [new TextRun({ text: report.framework_name || '', size: 32, font: 'Calibri', color: '374151' })],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 200 },
+        children: [new TextRun({ text: reportTypeLabel(report.report_type), size: 28, font: 'Calibri', color: '6b7280' })],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 200 },
+        children: [new TextRun({
+          text: report.snapshot_at
+            ? new Date(report.snapshot_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+            : 'Draft',
+          size: 24, font: 'Calibri', color: '9ca3af',
+        })],
+      }),
+      new Paragraph({ children: [] }),
+      new Paragraph({ children: [] }),
+      new Paragraph({ children: [] }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 600 },
+        children: [new TextRun({ text: 'Generated by AuditFlow', size: 20, font: 'Calibri', color: '9ca3af' })],
+      }),
+    ],
+  };
+}
+
+// ── DOCX section heading helper ──
+
+function docxSectionHeading(text) {
+  return new Paragraph({
+    heading: HeadingLevel.HEADING_1,
+    spacing: { before: 200, after: 100 },
+    children: [new TextRun({ text, bold: true, size: 28, font: 'Calibri', color: DARK_BLUE })],
+  });
+}
+
+// ── Main DOCX generator ──
+
 async function generateReportDocx(report) {
   const visibleSections = (report.sections || []).filter(s => s.visible).sort((a, b) => a.order - b.order);
   const findings = report.control_findings || [];
@@ -655,95 +920,104 @@ async function generateReportDocx(report) {
     ? Math.round(assessed.reduce((s, f) => s + (f.score_override ?? f.compliance_score ?? 0), 0) / assessed.length)
     : 0;
 
-  const children = [];
+  const contentChildren = [];
 
-  // Title
-  children.push(new Paragraph({
-    heading: HeadingLevel.TITLE,
-    children: [new TextRun({ text: report.title, bold: true, size: 52, font: 'Calibri', color: DARK_BLUE })],
-  }));
-
-  // Meta
-  children.push(new Paragraph({
-    spacing: { after: 100 },
-    children: [new TextRun({ text: `Framework: ${report.framework_name || ''}  |  Type: ${reportTypeLabel(report.report_type)}  |  Generated: ${report.snapshot_at ? new Date(report.snapshot_at).toLocaleDateString() : 'Draft'}`, size: 20, color: '6b7280', font: 'Calibri' })],
-  }));
-
-  children.push(new Paragraph({ children: [] })); // spacer
-
-  // Build sections
+  // Build section content
   for (const section of visibleSections) {
-    if (section.type === 'scoring_summary') {
-      children.push(new Paragraph({
-        heading: HeadingLevel.HEADING_1,
-        children: [new TextRun({ text: section.title, bold: true, size: 28, font: 'Calibri', color: DARK_BLUE })],
-      }));
-      children.push(new Paragraph({
-        spacing: { after: 200 },
-        children: [
-          new TextRun({ text: `Overall Score: ${avgScore}%`, bold: true, size: 22, font: 'Calibri' }),
-          new TextRun({ text: `   |   Compliant: ${compliant}   |   Partial: ${partial}   |   Non-Compliant: ${nonCompliant}   |   Total: ${total}`, size: 20, font: 'Calibri', color: '374151' }),
-        ],
-      }));
-    } else if (section.type === 'control_findings') {
-      children.push(new Paragraph({
-        heading: HeadingLevel.HEADING_1,
-        spacing: { after: 100 },
-        children: [new TextRun({ text: section.title, bold: true, size: 28, font: 'Calibri', color: DARK_BLUE })],
-      }));
-      if (findings.length > 0) {
-        children.push(buildFindingsDocxTable(findings, report.column_config));
-      } else {
-        children.push(new Paragraph({ children: [new TextRun({ text: 'No control findings available.', italics: true, size: 20 })] }));
-      }
-    } else if (section.type === 'testing_conducted') {
-      children.push(new Paragraph({
-        heading: HeadingLevel.HEADING_1,
-        spacing: { after: 100 },
-        children: [new TextRun({ text: section.title, bold: true, size: 28, font: 'Calibri', color: DARK_BLUE })],
-      }));
-      if (manifest.length > 0) {
-        children.push(new Paragraph({
-          spacing: { after: 100 },
-          children: [new TextRun({ text: `The following ${manifest.length} evidence document(s) were analyzed:`, size: 20, font: 'Calibri' })],
+    switch (section.type) {
+      case 'scoring_summary':
+        contentChildren.push(docxSectionHeading(section.title));
+        contentChildren.push(new Paragraph({
+          spacing: { after: 200 },
+          children: [
+            new TextRun({ text: `Overall Score: ${avgScore}%`, bold: true, size: 22, font: 'Calibri' }),
+            new TextRun({ text: `   |   Compliant: ${compliant}   |   Partial: ${partial}   |   Non-Compliant: ${nonCompliant}   |   Total: ${total}`, size: 20, font: 'Calibri', color: '374151' }),
+          ],
         }));
-        children.push(buildTestingDocxTable(manifest));
-      } else {
-        children.push(new Paragraph({ children: [new TextRun({ text: 'No evidence documents were analyzed.', italics: true, size: 20 })] }));
-      }
-    } else {
-      // Text sections (introduction, scope, executive_summary, custom)
-      children.push(new Paragraph({
-        heading: HeadingLevel.HEADING_1,
-        children: [new TextRun({ text: section.title, bold: true, size: 28, font: 'Calibri', color: DARK_BLUE })],
-      }));
-      const content = section.content || '';
-      if (content) {
-        // Split by newlines to create paragraphs
-        const lines = content.split('\n').filter(l => l.trim());
-        for (const line of lines) {
-          children.push(new Paragraph({
-            spacing: { after: 100 },
-            children: [new TextRun({ text: line, size: 22, font: 'Calibri', color: '374151' })],
-          }));
+        break;
+
+      case 'control_findings':
+        contentChildren.push(docxSectionHeading(section.title));
+        if (findings.length > 0) {
+          if (section.metadata?.grouped) {
+            contentChildren.push(...buildGroupedFindingsDocxElements(findings, report.column_config));
+          } else {
+            contentChildren.push(buildFindingsDocxTable(findings, report.column_config));
+          }
+        } else {
+          contentChildren.push(new Paragraph({ children: [new TextRun({ text: 'No control findings available.', italics: true, size: 20 })] }));
         }
-      } else {
-        children.push(new Paragraph({ children: [new TextRun({ text: 'No content provided.', italics: true, size: 20, color: '9ca3af' })] }));
+        break;
+
+      case 'testing_conducted':
+        contentChildren.push(docxSectionHeading(section.title));
+        if (manifest.length > 0) {
+          contentChildren.push(new Paragraph({
+            spacing: { after: 100 },
+            children: [new TextRun({ text: `The following ${manifest.length} evidence document(s) were analyzed:`, size: 20, font: 'Calibri' })],
+          }));
+          contentChildren.push(buildTestingDocxTable(manifest));
+        } else {
+          contentChildren.push(new Paragraph({ children: [new TextRun({ text: 'No evidence documents were analyzed.', italics: true, size: 20 })] }));
+        }
+        break;
+
+      case 'rating_legend': {
+        contentChildren.push(docxSectionHeading(section.title));
+        const legendTable = buildRatingLegendDocxTable(report.scoring_config);
+        if (legendTable) {
+          contentChildren.push(legendTable);
+        } else {
+          contentChildren.push(new Paragraph({ children: [new TextRun({ text: 'No rating definitions configured.', italics: true, size: 20 })] }));
+        }
+        break;
+      }
+
+      case 'custom_table': {
+        contentChildren.push(docxSectionHeading(section.title));
+        const customTable = buildCustomDocxTable(section);
+        if (customTable) {
+          contentChildren.push(customTable);
+        } else {
+          contentChildren.push(new Paragraph({ children: [new TextRun({ text: 'No data provided.', italics: true, size: 20 })] }));
+        }
+        break;
+      }
+
+      default: {
+        // All narrative sections: introduction, scope, methodology, executive_summary, custom
+        contentChildren.push(docxSectionHeading(section.title));
+        const content = section.content || '';
+        if (content) {
+          const lines = content.split('\n').filter(l => l.trim());
+          for (const line of lines) {
+            contentChildren.push(new Paragraph({
+              spacing: { after: 100 },
+              children: [new TextRun({ text: line, size: 22, font: 'Calibri', color: '374151' })],
+            }));
+          }
+        } else {
+          contentChildren.push(new Paragraph({ children: [new TextRun({ text: 'No content provided.', italics: true, size: 20, color: '9ca3af' })] }));
+        }
+        break;
       }
     }
 
-    children.push(new Paragraph({ children: [] })); // spacer between sections
+    contentChildren.push(new Paragraph({ children: [] })); // spacer between sections
   }
 
   // Footer
-  children.push(new Paragraph({
+  contentChildren.push(new Paragraph({
     alignment: AlignmentType.CENTER,
     spacing: { before: 400 },
     children: [new TextRun({ text: `Generated by AuditFlow — ${new Date().toLocaleDateString()}`, size: 16, color: '9ca3af', font: 'Calibri' })],
   }));
 
   const doc = new Document({
-    sections: [{ children }],
+    sections: [
+      buildCoverPageSection(report),
+      { children: contentChildren },
+    ],
   });
 
   return Packer.toBuffer(doc);

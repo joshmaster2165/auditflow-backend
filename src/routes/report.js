@@ -24,10 +24,45 @@ router.post('/', async (req, res) => {
     const validTypes = ['audit_compliance', 'readiness_gap', 'maturity'];
     const type = validTypes.includes(reportType) ? reportType : 'readiness_gap';
 
-    // Default scoring config based on report type
-    const defaultScoring = type === 'maturity'
-      ? { scale: '1-5', thresholds: { compliant: 4, partial: 2 }, custom_labels: { '5': 'Optimized', '4': 'Managed', '3': 'Defined', '2': 'Developing', '1': 'Initial' } }
-      : { scale: 'percentage', thresholds: { compliant: 80, partial: 50 } };
+    // Default scoring config based on report type (includes tier_descriptions for rating legend)
+    let defaultScoring;
+    if (type === 'maturity') {
+      defaultScoring = {
+        scale: '1-5',
+        thresholds: { compliant: 4, partial: 2 },
+        custom_labels: { '5': 'Optimized', '4': 'Managed', '3': 'Defined', '2': 'Developing', '1': 'Initial' },
+        tier_descriptions: {
+          'Optimized (5)': 'Processes are continuously improved through monitoring, feedback, and innovation.',
+          'Managed (4)': 'Processes are measured and controlled with quantitative objectives.',
+          'Defined (3)': 'Processes are documented, standardized, and integrated into the organization.',
+          'Developing (2)': 'Processes are planned and tracked but may be inconsistent.',
+          'Initial (1)': 'Processes are ad hoc and not formally defined.',
+        },
+      };
+    } else if (type === 'audit_compliance') {
+      defaultScoring = {
+        scale: 'custom',
+        thresholds: { 'Conforms': 80, 'Opportunity for Improvement': 50, 'Non-Conformity': 0 },
+        tier_descriptions: {
+          'Conforms': 'Requirement is fulfilled and operating effectively.',
+          'Opportunity for Improvement': 'Requirement is aligned but minor gaps, inconsistencies, or lack of clarity were detected. Enhancements are recommended.',
+          'Non-Conformity — Major': 'Significant failure or absence to implement or maintain a requirement. Raises serious doubt about the system achieving its objectives.',
+          'Non-Conformity — Minor': 'A less severe issue representing a partial or isolated deviation from a requirement. Does not pose immediate risk but requires corrective action.',
+          'Not Assessed': 'The control was not evaluated during this assessment.',
+        },
+      };
+    } else {
+      defaultScoring = {
+        scale: 'percentage',
+        thresholds: { compliant: 80, partial: 50 },
+        tier_descriptions: {
+          'Compliant (≥80%)': 'The control meets the applicable requirement and is operating effectively.',
+          'Partially Compliant (50-79%)': 'The control partially meets the requirement with gaps identified.',
+          'Non-Compliant (<50%)': 'The control does not meet the applicable requirement.',
+          'Not Assessed': 'The control was not evaluated during this assessment.',
+        },
+      };
+    }
 
     const sections = buildDefaultSections(type, scope || '');
 
@@ -38,7 +73,7 @@ router.post('/', async (req, res) => {
       report_type: type,
       status: 'draft',
       scoring_config: scoringConfig || defaultScoring,
-      column_config: columnConfig || ['control_number', 'title', 'evidence', 'findings', 'gaps', 'recommendations', 'score'],
+      column_config: columnConfig || ['control_number', 'title', 'evidence', 'findings', 'gaps', 'recommendations', 'score', 'status'],
       sections,
       control_findings: [],
       evidence_manifest: [],
