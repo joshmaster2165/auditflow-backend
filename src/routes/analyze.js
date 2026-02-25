@@ -1404,7 +1404,7 @@ router.post('/consolidate/:parentControlId', async (req, res) => {
     // 3. Fetch all analysis_results for these controls
     let query = supabase
       .from('analysis_results')
-      .select('*, evidence:evidence_id (id, file_name, original_name), control:control_id (id, control_number, title)')
+      .select('*, evidence:evidence_id (id, file_name), control:control_id (id, control_number, title)')
       .in('control_id', controlIds)
       .not('status', 'eq', 'error')
       .not('status', 'eq', 'pending')
@@ -1442,7 +1442,7 @@ router.post('/consolidate/:parentControlId', async (req, res) => {
     const condensed = dedupedResults.map(r => ({
       control_number: r.control?.control_number || 'N/A',
       control_title: r.control?.title || 'Untitled',
-      evidence_name: r.evidence?.original_name || r.evidence?.file_name || 'Unknown document',
+      evidence_name: r.evidence?.file_name || 'Unknown document',
       status: r.status,
       compliance_percentage: r.compliance_percentage || 0,
       summary: r.summary || '',
