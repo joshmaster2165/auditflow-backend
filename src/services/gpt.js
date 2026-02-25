@@ -56,7 +56,7 @@ function attemptJsonRecovery(truncatedContent) {
  */
 function normalizeGptAnalysis(analysis) {
   if (!analysis.status) {
-    analysis.status = 'non_compliant';
+    analysis.status = 'partial';
   }
 
   // Try to find requirements_breakdown under alternative key names GPT might use
@@ -71,7 +71,7 @@ function normalizeGptAnalysis(analysis) {
   analysis.requirements_breakdown = analysis.requirements_breakdown.map((item, i) => ({
     requirement_id: item.requirement_id || item.id || `REQ-${i + 1}`,
     requirement_text: item.requirement_text || item.text || item.description || item.requirement || 'Sub-requirement',
-    status: item.status || 'missing',
+    status: item.status || 'partial',
     evidence_found: item.evidence_found || item.evidence || item.evidence_text || null,
     evidence_location: item.evidence_location || item.location || { start_index: -1, end_index: -1, section_context: null },
     evidence_source: item.evidence_source || item.source_document || null,
@@ -106,7 +106,7 @@ Your task is to analyze whether evidence documents satisfy specific compliance r
    - Prioritize MEANINGFUL coverage over exhaustive granularity — an auditor needs to see whether major obligations are met, not a checklist of every conjunction
 2. For each sub-requirement, determine if it is met, partially met, or missing based on the evidence
 3. Quote relevant evidence passages that support your findings — include 2-4 sentences of surrounding context so the highlighted region in the document viewer is meaningful. Prefer copying text from the document, but broader passages with context are better than narrow exact phrases.
-4. Explain your analysis reasoning in depth — describe HOW the evidence supports or fails to meet each sub-requirement, WHAT specific aspect of the evidence is relevant, and WHY your assessment is what it is. Do not just restate the requirement or the evidence — provide analytical insight.
+4. Provide concise, structured analysis notes using bullet points and **bold** for key terms. Keep each analysis_notes field to 2-3 sentences or bullet points maximum. Focus on the key finding, not exhaustive explanation.
 5. Identify gaps where evidence is insufficient and explain why they matter for compliance
 6. Provide actionable recommendations
 7. For each evidence passage found, provide the exact character offset location within the document text to enable visual highlighting in the document viewer
@@ -124,6 +124,22 @@ EVIDENCE MATCHING — apply these when evaluating whether evidence satisfies a s
 - Rate as "missing" ONLY when no evidence in the document is relevant to this requirement, even through reasonable inference. Do not rate "missing" simply because the wording does not match exactly.
 - Still distinguish genuinely different domains: a "Secure Coding Policy" does not satisfy a requirement for an "Information Security Policy" unless its content actually covers the required scope.
 - In analysis_notes: explain what evidence you found, what inference you drew, and your confidence level. If rating "partial" or "missing", state what additional evidence would close the gap.
+
+SCORING GUIDANCE:
+- compliance_percentage should reflect the proportion of the requirement addressed by the evidence, including through reasonable inference:
+  * 85-100%: All or nearly all sub-requirements met (directly or through strong inference)
+  * 60-84%: Most sub-requirements met, with minor gaps remaining
+  * 30-59%: Some evidence present but significant gaps remain
+  * 0-29%: Little to no relevant evidence found
+- When sub-requirements are met through reasonable inference, score them generously (80%+ for strong inference, 60-79% for moderate inference)
+- Map status thresholds: "compliant" when compliance >= 80%, "partial" when 40-79%, "non_compliant" when < 40%
+- confidence_score should reflect how certain you are in your assessment (1.0 = very certain, 0.5 = moderate, < 0.3 = uncertain)
+
+OUTPUT FORMATTING — use structured text in all free-text fields:
+- Use **bold** for key terms, policy names, and evidence references
+- Use _italics_ for document names and section references
+- Use bullet points (- or *) for lists within analysis_notes, gap_description, and recommendations
+- Keep all text fields concise: summary (1-2 sentences), analysis_notes (2-3 bullets), gap_description (1 sentence), recommendations (1 sentence each)
 
 If the user provides custom analysis instructions, you MUST follow them. They take priority over default analysis behavior and may adjust what you focus on, how detailed your analysis is, or how you format your recommendations.
 
@@ -151,33 +167,33 @@ Return a JSON object with this structure. Adapt the depth and detail to what is 
   "status": "compliant" | "partial" | "non_compliant",
   "confidence_score": <number 0.0-1.0>,
   "compliance_percentage": <number 0-100>,
-  "summary": "<concise summary of overall findings>",
+  "summary": "<1-2 sentence executive summary of key findings>",
   "requirements_breakdown": [
     {
       "requirement_id": "<short ID like REQ-1>",
       "requirement_text": "<the sub-requirement being tested>",
       "status": "met" | "partial" | "missing",
       "evidence_found": "<Copy a relevant passage from the document — include 2-4 full sentences of surrounding context to create a meaningful highlighted region in the document viewer. Broader context is better than a narrow exact phrase. If no direct quote is possible, describe what in the document supports this finding and include key phrases from the document in 'single quotes'. Null if no evidence exists.>",
-      "analysis_notes": "<your analysis reasoning: explain WHY you rated this status, HOW the evidence connects to the requirement, and what the evidence demonstrates about compliance. This should help an auditor understand your assessment.>",
+      "analysis_notes": "<2-3 bullet points max: key finding, evidence link, and compliance impact>",
       "evidence_location": {
-        "start_index": <0-indexed character position where the evidence_found quote begins in the Evidence Document Content above>,
-        "end_index": <0-indexed character position where the quote ends>,
+        "start_index": <approximate 0-indexed character position where the evidence_found quote begins>,
+        "end_index": <approximate character position where the quote ends>,
         "section_context": "<heading or section name where this evidence appears, or null>"
       },
-      "gap_description": "<what is missing and WHY it matters for compliance, or null if fully met>",
+      "gap_description": "<brief description of gap, or null if met>",
       "confidence": <number 0.0-1.0>
     }
   ],
-  "recommendations": ["<actionable recommendation>", ...],
-  "critical_gaps": ["<critical finding>", ...]
+  "recommendations": ["<short actionable recommendation (1 sentence each)>", ...],
+  "critical_gaps": ["<brief critical finding (1 sentence each)>", ...]
 }
 
 For evidence_found: Copy a relevant passage from the document with 2-4 sentences of surrounding context — this text is matched against the document to create highlights in the document viewer. Broader highlighted regions with context are more useful than narrow exact phrases. The matching system handles minor variations, so focus on capturing the right area rather than character-perfect precision. If the evidence is spread across sections, describe what you found and wrap key phrases from the document in 'single quotes' so they can still be located.
 
-For analysis_notes: This is REQUIRED for every sub-requirement. Provide substantive analytical reasoning:
-- For "met" items: explain WHAT specific language, policy, or mechanism in the evidence satisfies the requirement, and HOW it demonstrates compliance. Do not just say "the document addresses this."
-- For "partial" items: explain WHAT is present in the evidence, WHAT is missing or insufficient, and WHY the gap matters for compliance.
-- For "missing" items: explain WHAT you looked for in the document, confirm that no relevant content was found, and explain the compliance risk of this gap.
+For analysis_notes: REQUIRED. Keep concise (2-3 bullet points max). Use **bold** for key terms and _italic_ for document references:
+- "met": - What evidence satisfies this (1 sentence) - How it demonstrates compliance
+- "partial": - What is covered - What gap remains
+- "missing": - What was looked for - Compliance risk
 
 For evidence_location: Provide an approximate character position (0-indexed) where the quoted passage begins and ends within the "Evidence Document Content" section above. An approximate range is fine — the system uses fuzzy matching to locate the passage. If you are unsure of the position, set start_index and end_index to -1 and provide section_context with the heading or section name instead.
 
@@ -238,7 +254,7 @@ Return a JSON object. You MUST evaluate every control listed above. For each con
       "status": "compliant" | "partial" | "non_compliant",
       "compliance_percentage": <number 0-100>,
       "confidence_score": <number 0.0-1.0>,
-      "summary": "<concise summary for this specific control>",
+      "summary": "<1-2 sentence summary for this control>",
       "requirements_breakdown": [
         {
           "requirement_id": "<short ID like REQ-1>",
@@ -246,13 +262,13 @@ Return a JSON object. You MUST evaluate every control listed above. For each con
           "status": "met" | "partial" | "missing",
           "evidence_found": "<Copy a relevant passage from the document with 2-4 sentences of surrounding context — broader highlighted regions are more useful than narrow exact phrases. If no direct quote is possible, describe what supports this finding and include key phrases from the document in 'single quotes'. For images, describe the specific visual evidence.>",
           "evidence_source": "<exact filename of the document this evidence came from>",
-          "analysis_notes": "<your analysis reasoning: explain WHY you rated this status, HOW the evidence connects to the requirement, and what the evidence demonstrates about compliance.>",
-          "gap_description": "<what is missing AND why it matters for compliance, or null if fully met>",
+          "analysis_notes": "<2-3 bullet points max: key finding, evidence link, and compliance impact>",
+          "gap_description": "<brief description of gap, or null if met>",
           "confidence": <number 0.0-1.0>
         }
       ],
-      "recommendations": ["<actionable recommendation>", ...],
-      "critical_gaps": ["<critical finding>", ...]
+      "recommendations": ["<short actionable recommendation (1 sentence)>", ...],
+      "critical_gaps": ["<brief critical finding (1 sentence)>", ...]
     }
   ]
 }
@@ -260,10 +276,10 @@ Return a JSON object. You MUST evaluate every control listed above. For each con
 CRITICAL: You MUST include ALL ${controls.length} controls in the "controls" array — one entry per control listed above.
 For evidence_found: Copy a relevant passage from the document with 2-4 sentences of surrounding context — broader highlighted regions are more useful than narrow exact phrases. The matching system handles minor variations. If evidence is contextual, describe what supports the finding and wrap key phrases from the document in 'single quotes'.
 CRITICAL for evidence_source: Specify the exact filename from the "=== DOCUMENT N: filename ===" headers.
-CRITICAL for analysis_notes: Provide substantive reasoning for each finding:
-- For "met" items: identify the mechanism, policy, artifact, or practice that satisfies the requirement — including through reasonable inference from demonstrated evidence.
-- For "partial" items: state what is covered (directly or by inference) and what gaps remain, with what additional evidence would help.
-- For "missing" items: confirm no relevant content exists across all documents even through reasonable inference, and explain the compliance risk.
+CRITICAL for analysis_notes: Keep concise (2-3 bullet points max). Use **bold** for key terms and _italic_ for document references:
+- "met": - What evidence/mechanism satisfies this - How it demonstrates compliance (including inference)
+- "partial": - What is covered - What gap remains
+- "missing": - Confirm no relevant content found - Compliance risk
 
 Sub-requirement decomposition for EACH control:
 For each control's requirements_breakdown, decompose the requirement into its KEY distinct obligations:
@@ -402,10 +418,10 @@ Return a JSON object with this structure:
 CRITICAL: Include the "extracted_text" field with ALL text you can read from the image.
 For visual_description: Describe what you SEE — paint a picture for an auditor who hasn't viewed the image. Include UI layout, visible settings, configuration states, labels, indicators, or physical elements.
 For evidence_found: Describe the specific visual evidence that addresses the requirement. Be concrete about what you observe.
-For analysis_notes: Provide substantive reasoning:
-- For "met" items: identify the specific visual element or text that satisfies the requirement.
-- For "partial" items: state what is visible and what is absent, and why the gap matters.
-- For "missing" items: describe what you looked for in the image and confirm it is not present.
+For analysis_notes: Keep concise (2-3 bullet points max). Use **bold** for key terms:
+- "met": - What visual element/text satisfies the requirement
+- "partial": - What is visible - What is absent
+- "missing": - What was looked for - Confirm not present
 For evidence_location: always use start_index: -1 and end_index: -1 since this is an image. Use section_context to describe the location within the image.
 
 Sub-requirement decomposition:
@@ -969,6 +985,10 @@ Rules:
 - If multiple documents address the same control, note the strongest evidence source
 - Do NOT invent findings — only consolidate what the individual analyses found
 - Be concise but thorough
+- Use relaxed scoring thresholds: "compliant" when compliance >= 80%, "partial" when 40-79%, "non_compliant" when < 40%
+- When evidence from multiple documents covers a requirement through reasonable inference, score generously
+- Use **bold** for key terms and _italic_ for document names in all free-text fields
+- Keep text concise: consolidated_summary (2-4 sentences), key_findings (1-2 sentences each), recommendations (1 sentence each)
 
 You must respond with valid JSON only.`;
 
