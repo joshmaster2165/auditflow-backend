@@ -5,6 +5,7 @@ const cors = require('cors');
 const analyzeRoutes = require('./routes/analyze');
 const frameworkRoutes = require('./routes/framework');
 const crosswalkRoutes = require('./routes/crosswalk');
+const reportRoutes = require('./routes/report');
 const { testConnection } = require('./utils/supabase');
 
 // ── Validate required environment variables ──
@@ -66,6 +67,7 @@ app.get('/health', (req, res) => {
 app.use('/api/analyze', analyzeRoutes);
 app.use('/api/framework', frameworkRoutes);
 app.use('/api/crosswalk', crosswalkRoutes);
+app.use('/api/report', reportRoutes);
 
 // Global error handler (includes multer errors)
 app.use((err, req, res, next) => {
