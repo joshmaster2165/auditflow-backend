@@ -78,6 +78,7 @@ function normalizeGptAnalysis(analysis) {
     analysis_notes: item.analysis_notes || item.notes || item.reasoning || item.analysis || null,
     visual_description: item.visual_description || item.image_description || null,
     gap_description: item.gap_description || item.gap || item.gaps || null,
+    suggested_evidence: item.suggested_evidence || null,
     confidence: parseFloat(item.confidence || item.confidence_score || 0.5),
   }));
 
@@ -88,6 +89,7 @@ function normalizeGptAnalysis(analysis) {
   analysis.extracted_text = analysis.extracted_text || '';
   analysis.recommendations = Array.isArray(analysis.recommendations) ? analysis.recommendations : [];
   analysis.critical_gaps = Array.isArray(analysis.critical_gaps) ? analysis.critical_gaps : [];
+  analysis.suggested_evidence = Array.isArray(analysis.suggested_evidence) ? analysis.suggested_evidence : [];
 
   return analysis;
 }
@@ -110,6 +112,7 @@ Your task is to analyze whether evidence documents satisfy specific compliance r
 5. Identify gaps where evidence is insufficient and explain why they matter for compliance
 6. Provide actionable recommendations
 7. For each evidence passage found, provide the exact character offset location within the document text to enable visual highlighting in the document viewer
+8. For any "partial" or "missing" finding, proactively suggest specific additional evidence that would help validate the requirement. Be concrete — name specific document types, artifacts, screenshots, or system exports (e.g., a **User Provisioning Procedure**, an **Access Control Matrix** screenshot, **change management logs** from the past 12 months). Do not be vague — suggest the exact type of evidence an auditor would ask for.
 
 THOROUGHNESS IS IMPORTANT. Cover all major obligations in the requirement, but group related items sensibly. An auditor using your output should see every distinct obligation area addressed — but closely related items (like lists of similar actors or assets sharing the same obligation) should be grouped into single findings for readability.
 
@@ -173,7 +176,7 @@ Return a JSON object with this structure. Adapt the depth and detail to what is 
       "requirement_id": "<short ID like REQ-1>",
       "requirement_text": "<the sub-requirement being tested>",
       "status": "met" | "partial" | "missing",
-      "evidence_found": "<Copy a relevant passage from the document — include 2-4 full sentences of surrounding context to create a meaningful highlighted region in the document viewer. Broader context is better than a narrow exact phrase. If no direct quote is possible, describe what in the document supports this finding and include key phrases from the document in 'single quotes'. Null if no evidence exists.>",
+      "evidence_found": "<Copy a relevant passage from the document with 2-4 sentences of context. Use **bold** to highlight the key phrases that directly address the requirement. If the passage contains a list or numbered items, preserve them with line breaks. If no direct quote is possible, describe what supports this finding and wrap key phrases in **bold**. Null if no evidence.>",
       "analysis_notes": "<2-3 bullet points max: key finding, evidence link, and compliance impact>",
       "evidence_location": {
         "start_index": <approximate 0-indexed character position where the evidence_found quote begins>,
@@ -181,19 +184,21 @@ Return a JSON object with this structure. Adapt the depth and detail to what is 
         "section_context": "<heading or section name where this evidence appears, or null>"
       },
       "gap_description": "<brief description of gap, or null if met>",
+      "suggested_evidence": "<specific document/artifact to upload that would validate this requirement (e.g., 'Access Control Matrix', 'Annual Review Meeting Minutes'), or null if fully met>",
       "confidence": <number 0.0-1.0>
     }
   ],
   "recommendations": ["<short actionable recommendation (1 sentence each)>", ...],
-  "critical_gaps": ["<brief critical finding (1 sentence each)>", ...]
+  "critical_gaps": ["<brief critical finding (1 sentence each)>", ...],
+  "suggested_evidence": ["<specific document or evidence type to upload that would strengthen this assessment>"]
 }
 
-For evidence_found: Copy a relevant passage from the document with 2-4 sentences of surrounding context — this text is matched against the document to create highlights in the document viewer. Broader highlighted regions with context are more useful than narrow exact phrases. The matching system handles minor variations, so focus on capturing the right area rather than character-perfect precision. If the evidence is spread across sections, describe what you found and wrap key phrases from the document in 'single quotes' so they can still be located.
+For evidence_found: Copy a relevant passage from the document with 2-4 sentences of surrounding context. Use **bold** to highlight the specific phrases that address the requirement — this helps auditors scan quickly. If the passage contains numbered lists or distinct items, preserve them on separate lines. The matching system strips formatting before comparing, so focus on capturing the right area. If evidence is spread across sections, describe what you found and **bold** key phrases from the document.
 
 For analysis_notes: REQUIRED. Keep concise (2-3 bullet points max). Use **bold** for key terms and _italic_ for document references:
 - "met": - What evidence satisfies this (1 sentence) - How it demonstrates compliance
-- "partial": - What is covered - What gap remains
-- "missing": - What was looked for - Compliance risk
+- "partial": - What is covered - What gap remains - What evidence to upload
+- "missing": - What was looked for - Compliance risk - What evidence to upload
 
 For evidence_location: Provide an approximate character position (0-indexed) where the quoted passage begins and ends within the "Evidence Document Content" section above. An approximate range is fine — the system uses fuzzy matching to locate the passage. If you are unsure of the position, set start_index and end_index to -1 and provide section_context with the heading or section name instead.
 
@@ -260,26 +265,28 @@ Return a JSON object. You MUST evaluate every control listed above. For each con
           "requirement_id": "<short ID like REQ-1>",
           "requirement_text": "<the sub-requirement being tested>",
           "status": "met" | "partial" | "missing",
-          "evidence_found": "<Copy a relevant passage from the document with 2-4 sentences of surrounding context — broader highlighted regions are more useful than narrow exact phrases. If no direct quote is possible, describe what supports this finding and include key phrases from the document in 'single quotes'. For images, describe the specific visual evidence.>",
+          "evidence_found": "<Copy a relevant passage with 2-4 sentences of context. Use **bold** to highlight key phrases that address the requirement. Preserve numbered lists with line breaks. For images, describe the specific visual evidence with key terms in **bold**.>",
           "evidence_source": "<exact filename of the document this evidence came from>",
           "analysis_notes": "<2-3 bullet points max: key finding, evidence link, and compliance impact>",
           "gap_description": "<brief description of gap, or null if met>",
+          "suggested_evidence": "<specific document/artifact to upload that would validate this requirement, or null if fully met>",
           "confidence": <number 0.0-1.0>
         }
       ],
       "recommendations": ["<short actionable recommendation (1 sentence)>", ...],
-      "critical_gaps": ["<brief critical finding (1 sentence)>", ...]
+      "critical_gaps": ["<brief critical finding (1 sentence)>", ...],
+      "suggested_evidence": ["<specific document or evidence type to upload that would strengthen this control's assessment>"]
     }
   ]
 }
 
 CRITICAL: You MUST include ALL ${controls.length} controls in the "controls" array — one entry per control listed above.
-For evidence_found: Copy a relevant passage from the document with 2-4 sentences of surrounding context — broader highlighted regions are more useful than narrow exact phrases. The matching system handles minor variations. If evidence is contextual, describe what supports the finding and wrap key phrases from the document in 'single quotes'.
+For evidence_found: Copy a relevant passage with 2-4 sentences of context. Use **bold** to highlight the specific phrases that address the requirement. Preserve numbered lists on separate lines. The matching system strips formatting before comparing. If evidence is spread across sections, describe what you found and **bold** key phrases.
 CRITICAL for evidence_source: Specify the exact filename from the "=== DOCUMENT N: filename ===" headers.
 CRITICAL for analysis_notes: Keep concise (2-3 bullet points max). Use **bold** for key terms and _italic_ for document references:
 - "met": - What evidence/mechanism satisfies this - How it demonstrates compliance (including inference)
-- "partial": - What is covered - What gap remains
-- "missing": - Confirm no relevant content found - Compliance risk
+- "partial": - What is covered - What gap remains - What evidence to upload
+- "missing": - Confirm no relevant content found - Compliance risk - What evidence to upload
 
 Sub-requirement decomposition for EACH control:
 For each control's requirements_breakdown, decompose the requirement into its KEY distinct obligations:
@@ -399,7 +406,7 @@ Return a JSON object with this structure:
       "requirement_id": "<short ID like REQ-1>",
       "requirement_text": "<the sub-requirement being tested>",
       "status": "met" | "partial" | "missing",
-      "evidence_found": "<describe the specific visual evidence that addresses this requirement — what you see in the image that constitutes evidence (e.g., 'Firewall admin panel shows port 22 blocked in rule #47 with deny action')>",
+      "evidence_found": "<describe the specific visual evidence with key terms in **bold** — what you see in the image that constitutes evidence (e.g., 'Firewall admin panel shows **port 22 blocked** in rule #47 with **deny action**')>",
       "visual_description": "<detailed description of what you observe in the image related to this requirement: UI elements, panels, settings, labels, indicators, physical elements, system state>",
       "analysis_notes": "<your analysis reasoning: explain HOW what you see in the image supports or fails to meet this requirement, and what it tells an auditor about compliance>",
       "evidence_location": {
@@ -408,11 +415,13 @@ Return a JSON object with this structure:
         "section_context": "<describe where in the image this evidence is located>"
       },
       "gap_description": "<what is missing and WHY it matters for compliance, or null if fully met>",
+      "suggested_evidence": "<specific document/artifact to upload that would validate this requirement, or null if fully met>",
       "confidence": <number 0.0-1.0>
     }
   ],
   "recommendations": ["<actionable recommendation>", ...],
-  "critical_gaps": ["<critical finding>", ...]
+  "critical_gaps": ["<critical finding>", ...],
+  "suggested_evidence": ["<specific document or evidence type to upload that would strengthen this assessment>"]
 }
 
 CRITICAL: Include the "extracted_text" field with ALL text you can read from the image.
@@ -420,8 +429,8 @@ For visual_description: Describe what you SEE — paint a picture for an auditor
 For evidence_found: Describe the specific visual evidence that addresses the requirement. Be concrete about what you observe.
 For analysis_notes: Keep concise (2-3 bullet points max). Use **bold** for key terms:
 - "met": - What visual element/text satisfies the requirement
-- "partial": - What is visible - What is absent
-- "missing": - What was looked for - Confirm not present
+- "partial": - What is visible - What is absent - What evidence to upload
+- "missing": - What was looked for - Confirm not present - What evidence to upload
 For evidence_location: always use start_index: -1 and end_index: -1 since this is an image. Use section_context to describe the location within the image.
 
 Sub-requirement decomposition:
@@ -989,6 +998,7 @@ Rules:
 - When evidence from multiple documents covers a requirement through reasonable inference, score generously
 - Use **bold** for key terms and _italic_ for document names in all free-text fields
 - Keep text concise: consolidated_summary (2-4 sentences), key_findings (1-2 sentences each), recommendations (1 sentence each)
+- Consolidate suggested evidence from individual analyses — list the top evidence items that would have the most impact across multiple controls
 
 You must respond with valid JSON only.`;
 
@@ -1030,6 +1040,7 @@ function buildConsolidationPrompt(analyses, controlContext) {
   ],
   "consolidated_gaps": ["<gap description referencing which controls are affected>"],
   "consolidated_recommendations": ["<actionable recommendation>"],
+  "suggested_evidence": ["<specific document/evidence type that would strengthen compliance across assessed controls>"],
   "per_control_summary": [
     {
       "control_number": "<number>",

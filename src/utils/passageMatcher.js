@@ -19,6 +19,18 @@ function normalizeWs(str) {
 }
 
 /**
+ * Strip markdown formatting so evidence_found text can match against raw document text.
+ * Removes **bold**, *italic*, _underline_, and leading bullet markers (- or *).
+ */
+function stripMarkdown(str) {
+  return str
+    .replace(/\*\*(.+?)\*\*/g, '$1')   // **bold** → bold
+    .replace(/\*(.+?)\*/g, '$1')        // *italic* → italic
+    .replace(/_(.+?)_/g, '$1')          // _underline_ → underline
+    .replace(/^[-*]\s+/gm, '');         // leading bullets
+}
+
+/**
  * Map a character offset in the normalized (whitespace-collapsed) string
  * back to the corresponding offset in the original string.
  */
@@ -178,6 +190,7 @@ function verifyAndBuildHighlightRanges(documentText, requirementsBreakdown) {
 
     const loc = req.evidence_location || {};
     const quote = req.evidence_found;
+    const cleanQuote = stripMarkdown(quote);  // Strip markdown for matching against raw document text
     let startOffset = -1;
     let endOffset = -1;
     let matchQuality = 'unmatched';
@@ -185,11 +198,11 @@ function verifyAndBuildHighlightRanges(documentText, requirementsBreakdown) {
     // Tier 1: Verify GPT's claimed offsets
     if (loc.start_index >= 0 && loc.end_index > loc.start_index && loc.end_index <= documentText.length) {
       const slice = documentText.substring(loc.start_index, loc.end_index);
-      if (slice === quote) {
+      if (slice === cleanQuote) {
         startOffset = loc.start_index;
         endOffset = loc.end_index;
         matchQuality = 'exact';
-      } else if (normalizeWs(slice) === normalizeWs(quote)) {
+      } else if (normalizeWs(slice) === normalizeWs(cleanQuote)) {
         startOffset = loc.start_index;
         endOffset = loc.end_index;
         matchQuality = 'exact';
@@ -198,10 +211,10 @@ function verifyAndBuildHighlightRanges(documentText, requirementsBreakdown) {
 
     // Tier 2: Simple indexOf on original text
     if (matchQuality === 'unmatched') {
-      const idx = documentText.indexOf(quote);
+      const idx = documentText.indexOf(cleanQuote);
       if (idx !== -1) {
         startOffset = idx;
-        endOffset = idx + quote.length;
+        endOffset = idx + cleanQuote.length;
         matchQuality = 'exact';
       }
     }
@@ -213,7 +226,7 @@ function verifyAndBuildHighlightRanges(documentText, requirementsBreakdown) {
       const quotedPhrases = [];
       const quoteRegex = /["']([^"']{10,}?)["']/g;
       let m;
-      while ((m = quoteRegex.exec(quote)) !== null) {
+      while ((m = quoteRegex.exec(cleanQuote)) !== null) {
         quotedPhrases.push(m[1]);
       }
       // Sort longest first — longer phrases are more distinctive
@@ -250,7 +263,7 @@ function verifyAndBuildHighlightRanges(documentText, requirementsBreakdown) {
     // Tier 3: indexOf with whitespace normalization
     if (matchQuality === 'unmatched') {
       const normDoc = normalizeWs(documentText);
-      const normQuote = normalizeWs(quote);
+      const normQuote = normalizeWs(cleanQuote);
       if (normQuote.length >= 10) {
         const idx = normDoc.indexOf(normQuote);
         if (idx !== -1) {
@@ -263,7 +276,7 @@ function verifyAndBuildHighlightRanges(documentText, requirementsBreakdown) {
 
     // Tier 4: Fuzzy sliding window match (for old analyses where GPT paraphrased)
     if (matchQuality === 'unmatched') {
-      const fuzzyResult = fuzzyMatch(documentText, quote);
+      const fuzzyResult = fuzzyMatch(documentText, cleanQuote);
       if (fuzzyResult) {
         startOffset = fuzzyResult.startOffset;
         endOffset = fuzzyResult.endOffset;
