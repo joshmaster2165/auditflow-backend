@@ -16,6 +16,13 @@ const {
   PageBreak,
   SectionType,
   VerticalAlign,
+  PageOrientation,
+  convertInchesToTwip,
+  TableLayoutType,
+  Header,
+  Footer,
+  PageNumber,
+  HeightRule,
 } = require('docx');
 
 // ─────────────────────────────────────────────────────────────
@@ -612,11 +619,13 @@ function generateReportHtml(report) {
     .stat-label { font-size: 0.75rem; color: #6b7280; margin-top: 0.25rem; text-transform: uppercase; letter-spacing: 0.05em; }
     .findings-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin-top: 1rem; }
     .findings-table th { background: #1a1a2e; color: white; font-weight: 600; padding: 0.6rem; text-align: left; border-bottom: 2px solid #d1d5db; white-space: nowrap; }
-    .findings-table td { padding: 0.6rem; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
+    .findings-table td { padding: 0.6rem; border-bottom: 1px solid #e5e7eb; vertical-align: top; word-break: break-word; }
     .findings-table tr:nth-child(even) { background: #f9fafb; }
-    .evidence-list { font-size: 0.75rem; color: #6b7280; }
+    .evidence-list { font-size: 0.8rem; color: #6b7280; }
     .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; font-size: 0.75rem; color: #9ca3af; text-align: center; }
+    .category-header { page-break-before: auto; }
     @media print {
+      @page { size: landscape; margin: 0.5in; }
       body { padding: 0.5rem; }
       .container { max-width: 100%; }
       .header { border-radius: 0; }
@@ -654,9 +663,52 @@ const TABLE_ALT_BG = 'f3f4f6';
 const STATUS_COLORS = { compliant: '22c55e', partial: 'f59e0b', non_compliant: 'ef4444', not_assessed: '9ca3af' };
 const STATUS_LABELS = { compliant: 'Compliant', partial: 'Partial', non_compliant: 'Non-Compliant', not_assessed: 'Not Assessed' };
 
-function docxHeaderCell(text) {
+// Landscape page properties — 0.75" margins all around
+const PAGE_LANDSCAPE = {
+  page: {
+    size: { orientation: PageOrientation.LANDSCAPE },
+    margin: {
+      top: convertInchesToTwip(0.75),
+      bottom: convertInchesToTwip(0.75),
+      left: convertInchesToTwip(0.75),
+      right: convertInchesToTwip(0.75),
+    },
+  },
+};
+
+// Portrait page properties for cover page
+const PAGE_PORTRAIT = {
+  page: {
+    margin: {
+      top: convertInchesToTwip(1),
+      bottom: convertInchesToTwip(1),
+      left: convertInchesToTwip(1),
+      right: convertInchesToTwip(1),
+    },
+  },
+};
+
+// Usable landscape width = 11" - 2×0.75" = 9.5" = 13680 twips
+const LANDSCAPE_USABLE_WIDTH = convertInchesToTwip(9.5);
+
+// Column width percentages for findings tables (must sum to 100)
+const COLUMN_WIDTH_MAP = {
+  control_number: 8,
+  title: 14,
+  evidence: 12,
+  findings: 22,
+  gaps: 16,
+  recommendations: 16,
+  score: 6,
+  status: 6,
+};
+
+function docxHeaderCell(text, widthTwips) {
   return new TableCell({
     shading: { type: ShadingType.SOLID, color: TABLE_HEADER_BG },
+    verticalAlign: VerticalAlign.CENTER,
+    margins: { top: 60, bottom: 60, left: 80, right: 80 },
+    width: widthTwips ? { size: widthTwips, type: WidthType.DXA } : undefined,
     children: [new Paragraph({ children: [new TextRun({ text, bold: true, color: 'ffffff', size: 18, font: 'Calibri' })] })],
   });
 }
@@ -665,6 +717,8 @@ function docxCell(text, options = {}) {
   const runs = [new TextRun({ text: text || '—', size: 18, font: 'Calibri', ...options })];
   return new TableCell({
     shading: options.shading ? { type: ShadingType.SOLID, color: options.shading } : undefined,
+    margins: { top: 40, bottom: 40, left: 80, right: 80 },
+    width: options.widthTwips ? { size: options.widthTwips, type: WidthType.DXA } : undefined,
     children: [new Paragraph({ children: runs })],
   });
 }
@@ -674,32 +728,40 @@ function docxCell(text, options = {}) {
 function buildFindingsDocxTable(findings, columnConfig) {
   const cols = columnConfig || ['control_number', 'title', 'evidence', 'findings', 'gaps', 'recommendations', 'score'];
 
+  // Calculate column widths in twips based on COLUMN_WIDTH_MAP
+  const colWidths = cols.map(c => {
+    const pct = COLUMN_WIDTH_MAP[c] || Math.floor(100 / cols.length);
+    return Math.round((pct / 100) * LANDSCAPE_USABLE_WIDTH);
+  });
+
   const headerRow = new TableRow({
     tableHeader: true,
-    children: cols.map(c => docxHeaderCell(COL_HEADERS[c] || c)),
+    height: { value: 400, rule: HeightRule.ATLEAST },
+    children: cols.map((c, i) => docxHeaderCell(COL_HEADERS[c] || c, colWidths[i])),
   });
 
   const dataRows = findings.map((f, idx) => {
     const rowShading = idx % 2 === 1 ? TABLE_ALT_BG : undefined;
 
-    const cells = cols.map(col => {
+    const cells = cols.map((col, i) => {
+      const w = colWidths[i];
       switch (col) {
-        case 'control_number': return docxCell(f.control_number, { bold: true, shading: rowShading });
-        case 'title': return docxCell(f.title, { shading: rowShading });
-        case 'evidence': return docxCell(f.evidence_files.map(e => e.name).join(', ') || '—', { size: 16, color: '6b7280', shading: rowShading });
-        case 'findings': return docxCell(f.concise_finding || '—', { shading: rowShading });
-        case 'gaps': return docxCell(f.concise_gap || '—', { shading: rowShading });
-        case 'recommendations': return docxCell(f.concise_remediation || '—', { shading: rowShading });
+        case 'control_number': return docxCell(f.control_number, { bold: true, shading: rowShading, widthTwips: w });
+        case 'title': return docxCell(f.title, { shading: rowShading, widthTwips: w });
+        case 'evidence': return docxCell(f.evidence_files.map(e => e.name).join(', ') || '—', { size: 16, color: '6b7280', shading: rowShading, widthTwips: w });
+        case 'findings': return docxCell(f.concise_finding || '—', { shading: rowShading, widthTwips: w });
+        case 'gaps': return docxCell(f.concise_gap || '—', { shading: rowShading, widthTwips: w });
+        case 'recommendations': return docxCell(f.concise_remediation || '—', { shading: rowShading, widthTwips: w });
         case 'score': {
           const display = f.score_override != null ? String(f.score_override) : (f.scoring_criteria?.display_score || 'N/A');
-          return docxCell(display, { bold: true, shading: rowShading });
+          return docxCell(display, { bold: true, shading: rowShading, widthTwips: w });
         }
         case 'status': {
           const st = f.status_override || f.status;
           const color = STATUS_COLORS[st] || '9ca3af';
-          return docxCell(STATUS_LABELS[st] || st, { color, bold: true, shading: rowShading });
+          return docxCell(STATUS_LABELS[st] || st, { color, bold: true, shading: rowShading, widthTwips: w });
         }
-        default: return docxCell('—', { shading: rowShading });
+        default: return docxCell('—', { shading: rowShading, widthTwips: w });
       }
     });
 
@@ -707,7 +769,9 @@ function buildFindingsDocxTable(findings, columnConfig) {
   });
 
   return new Table({
+    layout: TableLayoutType.FIXED,
     width: { size: 100, type: WidthType.PERCENTAGE },
+    columnWidths: colWidths,
     rows: [headerRow, ...dataRows],
   });
 }
@@ -850,15 +914,12 @@ function buildCoverPageSection(report) {
   return {
     properties: {
       type: SectionType.NEXT_PAGE,
+      ...PAGE_PORTRAIT,
     },
     children: [
-      new Paragraph({ children: [] }),
-      new Paragraph({ children: [] }),
-      new Paragraph({ children: [] }),
-      new Paragraph({ children: [] }),
       new Paragraph({
         alignment: AlignmentType.CENTER,
-        spacing: { after: 400 },
+        spacing: { before: 3600, after: 400 },
         children: [new TextRun({ text: report.title, bold: true, size: 72, font: 'Calibri', color: DARK_BLUE })],
       }),
       new Paragraph({
@@ -881,12 +942,9 @@ function buildCoverPageSection(report) {
           size: 24, font: 'Calibri', color: '9ca3af',
         })],
       }),
-      new Paragraph({ children: [] }),
-      new Paragraph({ children: [] }),
-      new Paragraph({ children: [] }),
       new Paragraph({
         alignment: AlignmentType.CENTER,
-        spacing: { before: 600 },
+        spacing: { before: 2400 },
         children: [new TextRun({ text: 'Generated by AuditFlow', size: 20, font: 'Calibri', color: '9ca3af' })],
       }),
     ],
@@ -1006,17 +1064,26 @@ async function generateReportDocx(report) {
     contentChildren.push(new Paragraph({ children: [] })); // spacer between sections
   }
 
-  // Footer
-  contentChildren.push(new Paragraph({
-    alignment: AlignmentType.CENTER,
-    spacing: { before: 400 },
-    children: [new TextRun({ text: `Generated by AuditFlow — ${new Date().toLocaleDateString()}`, size: 16, color: '9ca3af', font: 'Calibri' })],
-  }));
-
   const doc = new Document({
     sections: [
       buildCoverPageSection(report),
-      { children: contentChildren },
+      {
+        properties: {
+          ...PAGE_LANDSCAPE,
+        },
+        footers: {
+          default: new Footer({
+            children: [new Paragraph({
+              alignment: AlignmentType.CENTER,
+              children: [
+                new TextRun({ text: 'Generated by AuditFlow  |  Page ', size: 16, color: '9ca3af', font: 'Calibri' }),
+                new TextRun({ children: [PageNumber.CURRENT], size: 16, color: '9ca3af', font: 'Calibri' }),
+              ],
+            })],
+          }),
+        },
+        children: contentChildren,
+      },
     ],
   });
 
