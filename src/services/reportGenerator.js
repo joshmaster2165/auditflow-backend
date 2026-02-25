@@ -1,53 +1,49 @@
-const OpenAI = require('openai');
 const crypto = require('crypto');
 const { supabase } = require('../utils/supabase');
-
-// ── OpenAI Client & Configuration ──
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-const GPT_MODEL = 'gpt-5.1';
-const GPT_MAX_TOKENS = 16384;
-const GPT_TEMPERATURE = 0.2;
-
-// ── OpenAI Error Handler ──
-function handleOpenAIError(err) {
-  if (err.status === 429) throw new Error('OpenAI rate limit exceeded. Please try again later.');
-  if (err.status === 401) throw new Error('Invalid OpenAI API key. Please check your OPENAI_API_KEY.');
-  throw err;
-}
+const {
+  Document,
+  Packer,
+  Paragraph,
+  TextRun,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
+  AlignmentType,
+  HeadingLevel,
+  BorderStyle,
+  ShadingType,
+  PageBreak,
+} = require('docx');
 
 // ─────────────────────────────────────────────────────────────
-// Default Section Templates by Report Type
+// Default Section Templates — All user-written narratives
 // ─────────────────────────────────────────────────────────────
 
 const DEFAULT_SECTIONS = {
   audit_compliance: [
-    { type: 'scope', title: 'Scope', order: 0, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
-    { type: 'methodology', title: 'Methodology', order: 1, visible: true, content: 'This assessment was conducted using AuditFlow\'s AI-powered compliance analysis engine. Evidence documents were analyzed against individual control requirements using natural language processing. Each control was decomposed into testable sub-requirements and evaluated independently against the provided evidence. Findings were then consolidated to produce this report.', editable: true, ai_generated: false, metadata: {} },
-    { type: 'executive_summary', title: 'Executive Summary', order: 2, visible: true, content: '', editable: true, ai_generated: true, metadata: {} },
+    { type: 'introduction', title: 'Introduction', order: 0, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'scope', title: 'Scope', order: 1, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'executive_summary', title: 'Executive Summary', order: 2, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
     { type: 'scoring_summary', title: 'Scoring Summary', order: 3, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
     { type: 'control_findings', title: 'Control Findings', order: 4, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'gap_analysis', title: 'Gap Analysis', order: 5, visible: true, content: '', editable: true, ai_generated: true, metadata: {} },
-    { type: 'recommendations', title: 'Recommendations', order: 6, visible: true, content: '', editable: true, ai_generated: true, metadata: {} },
-    { type: 'testing_conducted', title: 'Testing Conducted', order: 7, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'testing_conducted', title: 'Testing Conducted', order: 5, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
   ],
   readiness_gap: [
-    { type: 'scope', title: 'Scope', order: 0, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
-    { type: 'executive_summary', title: 'Executive Summary', order: 1, visible: true, content: '', editable: true, ai_generated: true, metadata: {} },
-    { type: 'scoring_summary', title: 'Scoring Summary', order: 2, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'control_findings', title: 'Control Findings', order: 3, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'gap_analysis', title: 'Gap Analysis', order: 4, visible: true, content: '', editable: true, ai_generated: true, metadata: {} },
-    { type: 'recommendations', title: 'Recommendations', order: 5, visible: true, content: '', editable: true, ai_generated: true, metadata: {} },
-    { type: 'testing_conducted', title: 'Testing Conducted', order: 6, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'introduction', title: 'Introduction', order: 0, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'scope', title: 'Scope', order: 1, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'executive_summary', title: 'Executive Summary', order: 2, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'scoring_summary', title: 'Scoring Summary', order: 3, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'control_findings', title: 'Control Findings', order: 4, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'testing_conducted', title: 'Testing Conducted', order: 5, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
   ],
   maturity: [
-    { type: 'scope', title: 'Scope', order: 0, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
-    { type: 'executive_summary', title: 'Executive Summary', order: 1, visible: true, content: '', editable: true, ai_generated: true, metadata: {} },
-    { type: 'scoring_summary', title: 'Maturity Scoring Summary', order: 2, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'control_findings', title: 'Control Maturity Assessment', order: 3, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
-    { type: 'gap_analysis', title: 'Gap Analysis', order: 4, visible: true, content: '', editable: true, ai_generated: true, metadata: {} },
-    { type: 'recommendations', title: 'Recommendations', order: 5, visible: true, content: '', editable: true, ai_generated: true, metadata: {} },
-    { type: 'testing_conducted', title: 'Testing Conducted', order: 6, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'introduction', title: 'Introduction', order: 0, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'scope', title: 'Scope', order: 1, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'executive_summary', title: 'Executive Summary', order: 2, visible: true, content: '', editable: true, ai_generated: false, metadata: {} },
+    { type: 'scoring_summary', title: 'Maturity Scoring Summary', order: 3, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'control_findings', title: 'Control Maturity Assessment', order: 4, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
+    { type: 'testing_conducted', title: 'Testing Conducted', order: 5, visible: true, content: null, editable: false, ai_generated: false, metadata: {} },
   ],
 };
 
@@ -98,6 +94,7 @@ function buildDefaultSections(reportType, scopeText) {
 
 // ─────────────────────────────────────────────────────────────
 // Data Gathering — Assemble data from existing tables
+// Uses consolidated_analyses for concise findings/gaps/remediation
 // ─────────────────────────────────────────────────────────────
 
 async function gatherReportData(projectId, frameworkId) {
@@ -140,7 +137,7 @@ async function gatherReportData(projectId, frameworkId) {
   }
   const dedupedResults = Array.from(seen.values());
 
-  // 4. Fetch consolidated analyses
+  // 4. Fetch consolidated analyses — the primary source for concise findings
   const { data: consolidations } = await supabase
     .from('consolidated_analyses')
     .select('*')
@@ -170,12 +167,13 @@ async function gatherReportData(projectId, frameworkId) {
     entry.analysis_count++;
   }
 
-  // 6. Build control findings
+  // 6. Build control findings — prefer consolidated data for concise fields
   const controlFindings = controls.map(control => {
     const resultsForControl = dedupedResults.filter(r => r.control_id === control.id);
     const consolidation = (consolidations || []).find(c => c.parent_control_id === control.id);
+    const conData = consolidation?.consolidated_data || null;
 
-    // Aggregate status
+    // Status and compliance from consolidation first, then raw analysis
     let status = 'not_assessed';
     let complianceScore = null;
 
@@ -194,18 +192,26 @@ async function gatherReportData(projectId, frameworkId) {
       }
     }
 
-    // Confidence
-    const validForConf = resultsForControl.filter(r => r.confidence_score != null);
-    const confidenceScore = validForConf.length > 0
-      ? parseFloat((validForConf.reduce((s, r) => s + parseFloat(r.confidence_score), 0) / validForConf.length).toFixed(2))
-      : null;
-
     // Evidence files
     const evidenceFiles = [];
     const seenEvidence = new Set();
+
+    // From consolidated per_control_summary evidence_documents first
+    if (conData?.per_control_summary) {
+      for (const pcs of conData.per_control_summary) {
+        for (const docName of (pcs.evidence_documents || [])) {
+          if (!seenEvidence.has(docName)) {
+            seenEvidence.add(docName);
+            evidenceFiles.push({ name: docName });
+          }
+        }
+      }
+    }
+
+    // Fill in from raw results for any missing
     for (const r of resultsForControl) {
-      if (r.evidence && !seenEvidence.has(r.evidence.id)) {
-        seenEvidence.add(r.evidence.id);
+      if (r.evidence && !seenEvidence.has(r.evidence.file_name)) {
+        seenEvidence.add(r.evidence.file_name);
         evidenceFiles.push({
           evidence_id: r.evidence.id,
           name: r.evidence.file_name,
@@ -214,16 +220,43 @@ async function gatherReportData(projectId, frameworkId) {
       }
     }
 
-    // Merge gaps, recommendations, findings, breakdowns
-    const allGaps = [...new Set(resultsForControl.flatMap(r => r.findings?.critical_gaps || []))];
-    const allRecs = [...new Set(resultsForControl.flatMap(r => r.recommendations || []))];
-    const summaries = resultsForControl.map(r => r.summary).filter(Boolean);
-    const allBreakdown = resultsForControl.flatMap(r =>
-      (r.findings?.requirements_breakdown || []).map(rb => ({
-        ...rb,
-        evidence_source: r.evidence?.file_name || 'Unknown',
-      }))
-    );
+    // Concise fields from consolidated data
+    let conciseFinding = '';
+    let conciseGap = '';
+    let conciseRemediation = '';
+
+    if (conData) {
+      // Use consolidated_summary as the main finding
+      conciseFinding = conData.consolidated_summary || '';
+
+      // Per-control key_finding if available — append for richer context
+      if (conData.per_control_summary && conData.per_control_summary.length > 0) {
+        const keyFindings = conData.per_control_summary
+          .map(pcs => pcs.key_finding)
+          .filter(Boolean);
+        if (keyFindings.length > 0 && !conciseFinding) {
+          conciseFinding = keyFindings.join(' ');
+        }
+      }
+
+      // Consolidated gaps
+      const gaps = conData.consolidated_gaps || [];
+      conciseGap = gaps.join('; ');
+
+      // Consolidated recommendations
+      const recs = conData.consolidated_recommendations || [];
+      conciseRemediation = recs.join('; ');
+    } else if (resultsForControl.length > 0) {
+      // Fallback to raw analysis results
+      const summaries = resultsForControl.map(r => r.summary).filter(Boolean);
+      conciseFinding = summaries.join(' ').substring(0, 500);
+
+      const allGaps = [...new Set(resultsForControl.flatMap(r => r.findings?.critical_gaps || []))];
+      conciseGap = allGaps.join('; ');
+
+      const allRecs = [...new Set(resultsForControl.flatMap(r => r.recommendations || []))];
+      conciseRemediation = allRecs.join('; ');
+    }
 
     return {
       control_id: control.id,
@@ -232,12 +265,10 @@ async function gatherReportData(projectId, frameworkId) {
       category: control.category || control.group || 'Uncategorized',
       status,
       compliance_score: complianceScore,
-      confidence_score: confidenceScore,
       evidence_files: evidenceFiles,
-      findings: summaries.join(' '),
-      gaps: allGaps,
-      recommendations: allRecs,
-      requirements_breakdown: allBreakdown,
+      concise_finding: conciseFinding,
+      concise_gap: conciseGap,
+      concise_remediation: conciseRemediation,
       scoring_criteria: { scale: 'percentage', raw_score: complianceScore, display_score: complianceScore != null ? `${complianceScore}%` : 'N/A' },
       score_override: null,
       status_override: null,
@@ -245,7 +276,7 @@ async function gatherReportData(projectId, frameworkId) {
     };
   });
 
-  console.log(`✅ Gathered: ${controls.length} controls, ${dedupedResults.length} analyses, ${evidenceMap.size} evidence files`);
+  console.log(`✅ Gathered: ${controls.length} controls, ${dedupedResults.length} analyses, ${(consolidations || []).length} consolidations, ${evidenceMap.size} evidence files`);
 
   return {
     framework,
@@ -256,299 +287,62 @@ async function gatherReportData(projectId, frameworkId) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// GPT Report Section Generation
+// Synchronous Report Generation — Pure data assembly, no AI
 // ─────────────────────────────────────────────────────────────
 
-const REPORT_SYSTEM_PROMPT = `You are a senior compliance auditor and technical writer producing formal audit reports.
-Your writing must be:
-- Professional and suitable for executive and board-level audiences
-- Specific and evidence-based — reference actual control findings and document names
-- Structured with clear conclusions and action items
-- Honest about gaps while maintaining a constructive tone
-- Concise but thorough
-
-You must respond with valid JSON only.`;
-
-function buildExecSummaryPrompt(reportData) {
-  const { framework, controlFindings, evidenceManifest, reportType } = reportData;
-
-  const total = controlFindings.length;
-  const compliant = controlFindings.filter(f => f.status === 'compliant').length;
-  const partial = controlFindings.filter(f => f.status === 'partial').length;
-  const nonCompliant = controlFindings.filter(f => f.status === 'non_compliant').length;
-  const notAssessed = controlFindings.filter(f => f.status === 'not_assessed').length;
-  const assessed = controlFindings.filter(f => f.compliance_score != null);
-  const avgCompliance = assessed.length > 0
-    ? Math.round(assessed.reduce((s, f) => s + f.compliance_score, 0) / assessed.length)
-    : 0;
-
-  // Category breakdown
-  const catMap = new Map();
-  for (const f of controlFindings) {
-    const cat = f.category;
-    if (!catMap.has(cat)) catMap.set(cat, []);
-    catMap.get(cat).push(f);
-  }
-
-  const catSummaries = Array.from(catMap.entries()).map(([cat, findings]) => {
-    const catAssessed = findings.filter(f => f.compliance_score != null);
-    const catAvg = catAssessed.length > 0
-      ? Math.round(catAssessed.reduce((s, f) => s + f.compliance_score, 0) / catAssessed.length)
-      : 0;
-    const topGaps = findings.flatMap(f => f.gaps).slice(0, 3);
-    return `- ${cat}: ${findings.length} controls, ${catAvg}% avg compliance. Key gaps: ${topGaps.join('; ') || 'None identified'}`;
-  }).join('\n');
-
-  const topGaps = controlFindings.flatMap(f => f.gaps).slice(0, 10);
-
-  const reportTypeLabel = { audit_compliance: 'Audit Compliance', readiness_gap: 'Readiness & Gap', maturity: 'Maturity Assessment' }[reportType] || reportType;
-
-  return `Generate an executive summary for a ${reportTypeLabel} report.
-
-## Framework: ${framework.name}
-## Evidence Documents Reviewed: ${evidenceManifest.length}
-## Assessment Scope: ${total} controls
-
-## Results:
-- Compliant: ${compliant}/${total}
-- Partially Compliant: ${partial}/${total}
-- Non-Compliant: ${nonCompliant}/${total}
-- Not Assessed: ${notAssessed}/${total}
-- Average Compliance: ${avgCompliance}%
-
-## Category Breakdown:
-${catSummaries}
-
-## Top Gaps:
-${topGaps.map((g, i) => `${i + 1}. ${g}`).join('\n') || 'None identified'}
-
-## Return JSON:
-{
-  "executive_summary": "<3-5 paragraph executive summary referencing key documents and findings>",
-  "key_findings": ["<finding 1>", "<finding 2>", "..."],
-  "risk_level": "low | medium | high | critical"
-}`;
-}
-
-function buildGapAnalysisPrompt(reportData) {
-  const { framework, controlFindings } = reportData;
-
-  const withGaps = controlFindings.filter(f => f.gaps.length > 0 || (f.status !== 'compliant' && f.status !== 'not_assessed'));
-
-  const gapDetails = withGaps.slice(0, 50).map(f =>
-    `### ${f.control_number} — ${f.title} [${f.status}, ${f.compliance_score ?? 'N/A'}%]
-Gaps: ${f.gaps.join('; ') || 'Partially met'}
-Evidence: ${f.evidence_files.map(e => e.name).join(', ') || 'None'}`
-  ).join('\n\n');
-
-  return `Generate a detailed gap analysis for the ${framework.name} assessment.
-
-## Controls with Gaps (${withGaps.length} of ${controlFindings.length} total):
-
-${gapDetails}
-
-## Return JSON:
-{
-  "gap_analysis": "<structured gap analysis narrative organized by category/domain, 4-8 paragraphs, referencing specific controls and documents>",
-  "gap_categories": [
-    { "category": "<domain>", "severity": "critical|high|medium|low", "gap_count": 0, "summary": "<1-2 sentences>", "remediation_effort": "high|medium|low" }
-  ],
-  "remediation_timeline": "<suggested phased approach, 2-3 sentences>"
-}`;
-}
-
-function buildRecommendationsPrompt(reportData) {
-  const { framework, controlFindings } = reportData;
-
-  const allRecs = controlFindings.flatMap(f =>
-    f.recommendations.map(r => ({ rec: r, control: f.control_number, status: f.status, score: f.compliance_score }))
-  );
-
-  const recDetails = allRecs.slice(0, 60).map((r, i) =>
-    `${i + 1}. [${r.control}] (${r.status}, ${r.score ?? 'N/A'}%): ${r.rec}`
-  ).join('\n');
-
-  return `Synthesize and prioritize recommendations for the ${framework.name} assessment.
-
-## Individual Recommendations (${allRecs.length} total):
-${recDetails}
-
-## Return JSON:
-{
-  "recommendations_narrative": "<synthesized recommendations organized by priority, 3-6 paragraphs>",
-  "prioritized_actions": [
-    { "priority": 1, "action": "<specific action>", "affected_controls": ["<control numbers>"], "effort": "low|medium|high", "impact": "low|medium|high", "timeline": "<suggested timeline>" }
-  ]
-}`;
-}
-
-async function generateSectionContent(sectionType, reportData) {
-  const promptBuilders = {
-    executive_summary: buildExecSummaryPrompt,
-    gap_analysis: buildGapAnalysisPrompt,
-    recommendations: buildRecommendationsPrompt,
-  };
-
-  const builder = promptBuilders[sectionType];
-  if (!builder) throw new Error(`No GPT prompt builder for section type: ${sectionType}`);
-
-  const userPrompt = builder(reportData);
-
-  try {
-    const response = await openai.chat.completions.create({
-      model: GPT_MODEL,
-      messages: [
-        { role: 'system', content: REPORT_SYSTEM_PROMPT },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: GPT_TEMPERATURE,
-      max_completion_tokens: GPT_MAX_TOKENS,
-      response_format: { type: 'json_object' },
-    });
-
-    const choice = response.choices[0];
-    let result;
-    try {
-      result = JSON.parse(choice.message.content);
-    } catch {
-      throw new Error('GPT returned invalid JSON during report section generation');
-    }
-
-    return {
-      result,
-      usage: response.usage,
-      model: response.model,
-    };
-  } catch (err) {
-    handleOpenAIError(err);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// Main Orchestrator — Fire-and-forget report generation
-// ─────────────────────────────────────────────────────────────
-
-async function runReportGeneration(reportId, jobId, jobs) {
+async function generateReport(reportId) {
   const startTime = Date.now();
-  const job = jobs.get(jobId);
 
-  try {
-    // 1. Fetch report
-    const { data: report, error: fetchErr } = await supabase
-      .from('reports')
-      .select('*')
-      .eq('id', reportId)
-      .single();
+  // 1. Fetch report
+  const { data: report, error: fetchErr } = await supabase
+    .from('reports')
+    .select('*')
+    .eq('id', reportId)
+    .single();
 
-    if (fetchErr || !report) throw new Error('Report not found');
+  if (fetchErr || !report) throw new Error('Report not found');
 
-    if (job) {
-      job.progress = 'Gathering analysis data...';
-      job.sectionsTotal = 0;
-      job.sectionsCompleted = 0;
-    }
+  // 2. Gather data from consolidated analyses + raw analysis fallback
+  const reportData = await gatherReportData(report.project_id, report.framework_id);
 
-    // 2. Gather data
-    const reportData = await gatherReportData(report.project_id, report.framework_id);
-    reportData.reportType = report.report_type;
+  // 3. Apply scoring config to all findings
+  const scoredFindings = reportData.controlFindings.map(f => ({
+    ...f,
+    scoring_criteria: mapScoreToScale(f.compliance_score, report.scoring_config),
+  }));
 
-    // 3. Figure out which AI sections to generate
-    const sections = report.sections || [];
-    const aiSections = sections.filter(s => s.visible && s.ai_generated && s.type !== 'custom');
-    if (job) job.sectionsTotal = aiSections.length;
+  // 4. Update report — one save, done
+  const durationMs = Date.now() - startTime;
 
-    console.log(`🤖 Generating ${aiSections.length} AI sections for report ${reportId}...`);
+  const { data: updated, error: updateErr } = await supabase
+    .from('reports')
+    .update({
+      status: 'complete',
+      control_findings: scoredFindings,
+      evidence_manifest: reportData.evidenceManifest,
+      snapshot_at: new Date().toISOString(),
+      generation_metadata: {
+        duration_ms: durationMs,
+        controls_count: reportData.controlFindings.length,
+        evidence_count: reportData.evidenceManifest.length,
+        consolidations_used: reportData.controlFindings.filter(f => f.concise_finding).length,
+      },
+      error: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', reportId)
+    .select()
+    .single();
 
-    // 4. Generate AI sections sequentially
-    let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  if (updateErr) throw new Error(`Failed to save report: ${updateErr.message}`);
 
-    for (const section of aiSections) {
-      if (job) job.progress = `Generating ${section.title}...`;
-      console.log(`  📝 Generating: ${section.title} (${section.type})`);
+  console.log(`✅ Report ${reportId} generated in ${durationMs}ms (${scoredFindings.length} controls)`);
 
-      try {
-        const { result, usage } = await generateSectionContent(section.type, reportData);
-
-        // Map result to section content
-        if (section.type === 'executive_summary') {
-          section.content = result.executive_summary || '';
-          section.metadata = { key_findings: result.key_findings || [], risk_level: result.risk_level || 'medium' };
-        } else if (section.type === 'gap_analysis') {
-          section.content = result.gap_analysis || '';
-          section.metadata = { gap_categories: result.gap_categories || [], remediation_timeline: result.remediation_timeline || '' };
-        } else if (section.type === 'recommendations') {
-          section.content = result.recommendations_narrative || '';
-          section.metadata = { prioritized_actions: result.prioritized_actions || [] };
-        }
-
-        if (usage) {
-          totalUsage.prompt_tokens += usage.prompt_tokens || 0;
-          totalUsage.completion_tokens += usage.completion_tokens || 0;
-          totalUsage.total_tokens += usage.total_tokens || 0;
-        }
-      } catch (err) {
-        console.error(`  ⚠️ Failed to generate ${section.title}:`, err.message);
-        section.content = `[Generation failed: ${err.message}. You can edit this section manually or try regenerating.]`;
-      }
-
-      if (job) job.sectionsCompleted = (job.sectionsCompleted || 0) + 1;
-    }
-
-    // 5. Apply scoring config
-    const scoredFindings = reportData.controlFindings.map(f => ({
-      ...f,
-      scoring_criteria: mapScoreToScale(f.compliance_score, report.scoring_config),
-    }));
-
-    // 6. Update report
-    const durationMs = Date.now() - startTime;
-
-    await supabase
-      .from('reports')
-      .update({
-        status: 'complete',
-        sections,
-        control_findings: scoredFindings,
-        evidence_manifest: reportData.evidenceManifest,
-        snapshot_at: new Date().toISOString(),
-        generation_metadata: {
-          model: GPT_MODEL,
-          tokens_used: totalUsage,
-          duration_ms: durationMs,
-          controls_count: reportData.controlFindings.length,
-          evidence_count: reportData.evidenceManifest.length,
-          ai_sections_generated: aiSections.length,
-        },
-        error: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', reportId);
-
-    console.log(`✅ Report ${reportId} generated in ${Math.round(durationMs / 1000)}s`);
-
-    if (job) {
-      job.status = 'completed';
-      job.completedAt = Date.now();
-      job.reportId = reportId;
-    }
-  } catch (err) {
-    console.error(`❌ Report generation failed:`, err.message);
-
-    await supabase
-      .from('reports')
-      .update({ status: 'error', error: err.message, updated_at: new Date().toISOString() })
-      .eq('id', reportId);
-
-    if (job) {
-      job.status = 'failed';
-      job.completedAt = Date.now();
-      job.error = err.message;
-    }
-  }
+  return updated;
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTML Export — Self-contained styled HTML for PDF conversion
+// HTML Export — Clean table-focused export for PDF conversion
 // ─────────────────────────────────────────────────────────────
 
 function escapeHtml(str) {
@@ -572,9 +366,14 @@ function renderControlFindingsTable(findings, columnConfig) {
   const cols = columnConfig || ['control_number', 'title', 'evidence', 'findings', 'gaps', 'recommendations', 'score'];
 
   const colHeaders = {
-    control_number: 'Control #', title: 'Title', evidence: 'Evidence', findings: 'Findings',
-    gaps: 'Gaps', recommendations: 'Recommendations', score: 'Score', confidence: 'Confidence',
-    status: 'Status', requirements_breakdown: 'Requirements',
+    control_number: 'Control #',
+    title: 'Title',
+    evidence: 'Evidence',
+    findings: 'Finding',
+    gaps: 'Gap',
+    recommendations: 'Remediation',
+    score: 'Score',
+    status: 'Status',
   };
 
   const headerRow = cols.map(c => `<th>${colHeaders[c] || c}</th>`).join('');
@@ -585,24 +384,17 @@ function renderControlFindingsTable(findings, columnConfig) {
         case 'control_number': return `<td><strong>${escapeHtml(f.control_number)}</strong></td>`;
         case 'title': return `<td>${escapeHtml(f.title)}</td>`;
         case 'evidence': return `<td class="evidence-list">${f.evidence_files.map(e => escapeHtml(e.name)).join('<br>') || '—'}</td>`;
-        case 'findings': return `<td>${escapeHtml(f.findings?.substring(0, 300) || '—')}${f.findings?.length > 300 ? '...' : ''}</td>`;
-        case 'gaps': return `<td>${f.gaps.length > 0 ? '<ul>' + f.gaps.map(g => `<li>${escapeHtml(g)}</li>`).join('') + '</ul>' : '—'}</td>`;
-        case 'recommendations': return `<td>${f.recommendations.length > 0 ? '<ul>' + f.recommendations.map(r => `<li>${escapeHtml(r)}</li>`).join('') + '</ul>' : '—'}</td>`;
+        case 'findings': return `<td>${escapeHtml(f.concise_finding || '—')}</td>`;
+        case 'gaps': return `<td>${escapeHtml(f.concise_gap || '—')}</td>`;
+        case 'recommendations': return `<td>${escapeHtml(f.concise_remediation || '—')}</td>`;
         case 'score': {
           const override = f.score_override != null;
           const display = override ? f.score_override : (f.scoring_criteria?.display_score || 'N/A');
           return `<td><strong>${escapeHtml(String(display))}</strong>${override ? ' <em>(override)</em>' : ''}</td>`;
         }
-        case 'confidence': return `<td>${f.confidence_score != null ? `${(f.confidence_score * 100).toFixed(0)}%` : '—'}</td>`;
         case 'status': {
           const st = f.status_override || f.status;
           return `<td>${statusBadge(st)}</td>`;
-        }
-        case 'requirements_breakdown': {
-          if (!f.requirements_breakdown || f.requirements_breakdown.length === 0) return '<td>—</td>';
-          const met = f.requirements_breakdown.filter(r => r.status === 'met').length;
-          const total = f.requirements_breakdown.length;
-          return `<td>${met}/${total} met</td>`;
         }
         default: return '<td>—</td>';
       }
@@ -625,18 +417,10 @@ function renderTestingConducted(evidenceManifest) {
     return '<div class="section"><h2>Testing Conducted</h2><p>No evidence documents were analyzed.</p></div>';
   }
 
-  const typeIcons = {
-    'application/pdf': '📄', 'image/png': '🖼️', 'image/jpeg': '🖼️', 'image/gif': '🖼️',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '📝',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': '📊',
-    'text/plain': '📃',
-  };
-
   const rows = evidenceManifest.map(e => {
-    const icon = typeIcons[e.file_type] || '📎';
     const controls = e.controls_analyzed.join(', ');
     return `<tr>
-      <td>${icon} ${escapeHtml(e.file_name)}</td>
+      <td>${escapeHtml(e.file_name)}</td>
       <td>${escapeHtml(e.file_type || 'Unknown')}</td>
       <td>${escapeHtml(controls)}</td>
       <td>${e.analysis_count}</td>
@@ -685,7 +469,7 @@ function generateReportHtml(report) {
           </div>
         </div>`;
     }
-    // Text sections
+    // Text sections (introduction, scope, executive_summary)
     return `
       <div class="section">
         <h2>${escapeHtml(section.title)}</h2>
@@ -715,11 +499,9 @@ function generateReportHtml(report) {
     .stat-value { font-size: 1.75rem; font-weight: 700; }
     .stat-label { font-size: 0.75rem; color: #6b7280; margin-top: 0.25rem; text-transform: uppercase; letter-spacing: 0.05em; }
     .findings-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin-top: 1rem; }
-    .findings-table th { background: #f3f4f6; font-weight: 600; padding: 0.6rem; text-align: left; border-bottom: 2px solid #d1d5db; white-space: nowrap; }
+    .findings-table th { background: #1a1a2e; color: white; font-weight: 600; padding: 0.6rem; text-align: left; border-bottom: 2px solid #d1d5db; white-space: nowrap; }
     .findings-table td { padding: 0.6rem; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
     .findings-table tr:nth-child(even) { background: #f9fafb; }
-    .findings-table ul { margin: 0; padding-left: 1.2rem; }
-    .findings-table li { margin-bottom: 0.2rem; }
     .evidence-list { font-size: 0.75rem; color: #6b7280; }
     .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; font-size: 0.75rem; color: #9ca3af; text-align: center; }
     @media print {
@@ -750,11 +532,232 @@ function generateReportHtml(report) {
 </html>`;
 }
 
+// ─────────────────────────────────────────────────────────────
+// DOCX Export — Proper Word document with tables
+// ─────────────────────────────────────────────────────────────
+
+const DARK_BLUE = '1a1a2e';
+const TABLE_HEADER_BG = '1a1a2e';
+const TABLE_ALT_BG = 'f3f4f6';
+const STATUS_COLORS = { compliant: '22c55e', partial: 'f59e0b', non_compliant: 'ef4444', not_assessed: '9ca3af' };
+const STATUS_LABELS = { compliant: 'Compliant', partial: 'Partial', non_compliant: 'Non-Compliant', not_assessed: 'Not Assessed' };
+
+function docxHeaderCell(text) {
+  return new TableCell({
+    shading: { type: ShadingType.SOLID, color: TABLE_HEADER_BG },
+    children: [new Paragraph({ children: [new TextRun({ text, bold: true, color: 'ffffff', size: 18, font: 'Calibri' })] })],
+  });
+}
+
+function docxCell(text, options = {}) {
+  const runs = [new TextRun({ text: text || '—', size: 18, font: 'Calibri', ...options })];
+  return new TableCell({
+    shading: options.shading ? { type: ShadingType.SOLID, color: options.shading } : undefined,
+    children: [new Paragraph({ children: runs })],
+  });
+}
+
+function buildFindingsDocxTable(findings, columnConfig) {
+  const cols = columnConfig || ['control_number', 'title', 'evidence', 'findings', 'gaps', 'recommendations', 'score'];
+
+  const colHeaders = {
+    control_number: 'Control #',
+    title: 'Title',
+    evidence: 'Evidence',
+    findings: 'Finding',
+    gaps: 'Gap',
+    recommendations: 'Remediation',
+    score: 'Score',
+    status: 'Status',
+  };
+
+  // Header row
+  const headerRow = new TableRow({
+    tableHeader: true,
+    children: cols.map(c => docxHeaderCell(colHeaders[c] || c)),
+  });
+
+  // Data rows
+  const dataRows = findings.map((f, idx) => {
+    const rowShading = idx % 2 === 1 ? TABLE_ALT_BG : undefined;
+
+    const cells = cols.map(col => {
+      switch (col) {
+        case 'control_number': return docxCell(f.control_number, { bold: true, shading: rowShading });
+        case 'title': return docxCell(f.title, { shading: rowShading });
+        case 'evidence': return docxCell(f.evidence_files.map(e => e.name).join(', ') || '—', { size: 16, color: '6b7280', shading: rowShading });
+        case 'findings': return docxCell(f.concise_finding || '—', { shading: rowShading });
+        case 'gaps': return docxCell(f.concise_gap || '—', { shading: rowShading });
+        case 'recommendations': return docxCell(f.concise_remediation || '—', { shading: rowShading });
+        case 'score': {
+          const display = f.score_override != null ? String(f.score_override) : (f.scoring_criteria?.display_score || 'N/A');
+          return docxCell(display, { bold: true, shading: rowShading });
+        }
+        case 'status': {
+          const st = f.status_override || f.status;
+          const color = STATUS_COLORS[st] || '9ca3af';
+          return docxCell(STATUS_LABELS[st] || st, { color, bold: true, shading: rowShading });
+        }
+        default: return docxCell('—', { shading: rowShading });
+      }
+    });
+
+    return new TableRow({ children: cells });
+  });
+
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [headerRow, ...dataRows],
+  });
+}
+
+function buildTestingDocxTable(evidenceManifest) {
+  const headerRow = new TableRow({
+    tableHeader: true,
+    children: [
+      docxHeaderCell('Document'),
+      docxHeaderCell('Type'),
+      docxHeaderCell('Controls Analyzed'),
+      docxHeaderCell('Analyses'),
+    ],
+  });
+
+  const dataRows = (evidenceManifest || []).map((e, idx) => {
+    const shading = idx % 2 === 1 ? TABLE_ALT_BG : undefined;
+    return new TableRow({
+      children: [
+        docxCell(e.file_name, { shading }),
+        docxCell(e.file_type || 'Unknown', { shading }),
+        docxCell(e.controls_analyzed.join(', '), { shading }),
+        docxCell(String(e.analysis_count), { shading }),
+      ],
+    });
+  });
+
+  return new Table({
+    width: { size: 100, type: WidthType.PERCENTAGE },
+    rows: [headerRow, ...dataRows],
+  });
+}
+
+async function generateReportDocx(report) {
+  const visibleSections = (report.sections || []).filter(s => s.visible).sort((a, b) => a.order - b.order);
+  const findings = report.control_findings || [];
+  const manifest = report.evidence_manifest || [];
+
+  // Aggregate stats
+  const total = findings.length;
+  const assessed = findings.filter(f => f.status !== 'not_assessed');
+  const compliant = findings.filter(f => (f.status_override || f.status) === 'compliant').length;
+  const partial = findings.filter(f => (f.status_override || f.status) === 'partial').length;
+  const nonCompliant = findings.filter(f => (f.status_override || f.status) === 'non_compliant').length;
+  const avgScore = assessed.length > 0
+    ? Math.round(assessed.reduce((s, f) => s + (f.score_override ?? f.compliance_score ?? 0), 0) / assessed.length)
+    : 0;
+
+  const children = [];
+
+  // Title
+  children.push(new Paragraph({
+    heading: HeadingLevel.TITLE,
+    children: [new TextRun({ text: report.title, bold: true, size: 52, font: 'Calibri', color: DARK_BLUE })],
+  }));
+
+  // Meta
+  children.push(new Paragraph({
+    spacing: { after: 100 },
+    children: [new TextRun({ text: `Framework: ${report.framework_name || ''}  |  Type: ${reportTypeLabel(report.report_type)}  |  Generated: ${report.snapshot_at ? new Date(report.snapshot_at).toLocaleDateString() : 'Draft'}`, size: 20, color: '6b7280', font: 'Calibri' })],
+  }));
+
+  children.push(new Paragraph({ children: [] })); // spacer
+
+  // Build sections
+  for (const section of visibleSections) {
+    if (section.type === 'scoring_summary') {
+      children.push(new Paragraph({
+        heading: HeadingLevel.HEADING_1,
+        children: [new TextRun({ text: section.title, bold: true, size: 28, font: 'Calibri', color: DARK_BLUE })],
+      }));
+      children.push(new Paragraph({
+        spacing: { after: 200 },
+        children: [
+          new TextRun({ text: `Overall Score: ${avgScore}%`, bold: true, size: 22, font: 'Calibri' }),
+          new TextRun({ text: `   |   Compliant: ${compliant}   |   Partial: ${partial}   |   Non-Compliant: ${nonCompliant}   |   Total: ${total}`, size: 20, font: 'Calibri', color: '374151' }),
+        ],
+      }));
+    } else if (section.type === 'control_findings') {
+      children.push(new Paragraph({
+        heading: HeadingLevel.HEADING_1,
+        spacing: { after: 100 },
+        children: [new TextRun({ text: section.title, bold: true, size: 28, font: 'Calibri', color: DARK_BLUE })],
+      }));
+      if (findings.length > 0) {
+        children.push(buildFindingsDocxTable(findings, report.column_config));
+      } else {
+        children.push(new Paragraph({ children: [new TextRun({ text: 'No control findings available.', italics: true, size: 20 })] }));
+      }
+    } else if (section.type === 'testing_conducted') {
+      children.push(new Paragraph({
+        heading: HeadingLevel.HEADING_1,
+        spacing: { after: 100 },
+        children: [new TextRun({ text: section.title, bold: true, size: 28, font: 'Calibri', color: DARK_BLUE })],
+      }));
+      if (manifest.length > 0) {
+        children.push(new Paragraph({
+          spacing: { after: 100 },
+          children: [new TextRun({ text: `The following ${manifest.length} evidence document(s) were analyzed:`, size: 20, font: 'Calibri' })],
+        }));
+        children.push(buildTestingDocxTable(manifest));
+      } else {
+        children.push(new Paragraph({ children: [new TextRun({ text: 'No evidence documents were analyzed.', italics: true, size: 20 })] }));
+      }
+    } else {
+      // Text sections (introduction, scope, executive_summary, custom)
+      children.push(new Paragraph({
+        heading: HeadingLevel.HEADING_1,
+        children: [new TextRun({ text: section.title, bold: true, size: 28, font: 'Calibri', color: DARK_BLUE })],
+      }));
+      const content = section.content || '';
+      if (content) {
+        // Split by newlines to create paragraphs
+        const lines = content.split('\n').filter(l => l.trim());
+        for (const line of lines) {
+          children.push(new Paragraph({
+            spacing: { after: 100 },
+            children: [new TextRun({ text: line, size: 22, font: 'Calibri', color: '374151' })],
+          }));
+        }
+      } else {
+        children.push(new Paragraph({ children: [new TextRun({ text: 'No content provided.', italics: true, size: 20, color: '9ca3af' })] }));
+      }
+    }
+
+    children.push(new Paragraph({ children: [] })); // spacer between sections
+  }
+
+  // Footer
+  children.push(new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { before: 400 },
+    children: [new TextRun({ text: `Generated by AuditFlow — ${new Date().toLocaleDateString()}`, size: 16, color: '9ca3af', font: 'Calibri' })],
+  }));
+
+  const doc = new Document({
+    sections: [{ children }],
+  });
+
+  return Packer.toBuffer(doc);
+}
+
+// ─────────────────────────────────────────────────────────────
+// Exports
+// ─────────────────────────────────────────────────────────────
+
 module.exports = {
   buildDefaultSections,
   mapScoreToScale,
   gatherReportData,
-  generateSectionContent,
-  runReportGeneration,
+  generateReport,
   generateReportHtml,
+  generateReportDocx,
 };

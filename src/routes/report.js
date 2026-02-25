@@ -1,19 +1,14 @@
 const express = require('express');
-const crypto = require('crypto');
 const router = express.Router();
 const { supabase } = require('../utils/supabase');
-const { createJobStore } = require('../utils/analysisHelpers');
 const {
   buildDefaultSections,
   mapScoreToScale,
   gatherReportData,
-  runReportGeneration,
-  generateSectionContent,
+  generateReport,
   generateReportHtml,
+  generateReportDocx,
 } = require('../services/reportGenerator');
-
-// ── In-memory job store for async report generation ──
-const jobs = createJobStore({ processingTimeoutMs: 20 * 60 * 1000 });
 
 // ─────────────────────────────────────────────────────────────
 // POST /api/report — Create draft report
@@ -69,7 +64,8 @@ router.post('/', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// POST /api/report/:reportId/generate — Generate AI content + snapshot data
+// POST /api/report/:reportId/generate — Synchronous data assembly
+// Pulls consolidated analyses + raw analysis fallback, no AI calls
 // ─────────────────────────────────────────────────────────────
 router.post('/:reportId/generate', async (req, res) => {
   try {
@@ -89,62 +85,34 @@ router.post('/:reportId/generate', async (req, res) => {
       return res.status(409).json({ error: 'Report is already being generated' });
     }
 
-    // Set status to generating
+    // Set status to generating (brief — will be overwritten quickly)
     await supabase
       .from('reports')
       .update({ status: 'generating', error: null, updated_at: new Date().toISOString() })
       .eq('id', reportId);
 
-    // Create job for polling
-    const jobId = crypto.randomUUID();
-    jobs.set(jobId, {
-      status: 'processing',
-      startedAt: Date.now(),
-      progress: 'Starting report generation...',
-      sectionsTotal: 0,
-      sectionsCompleted: 0,
-      reportId,
-    });
+    // Synchronous generation — no AI, just data assembly
+    const updatedReport = await generateReport(reportId);
 
-    // Fire and forget
-    runReportGeneration(reportId, jobId, jobs);
+    console.log(`✅ Report generated: ${reportId}`);
 
-    console.log(`🚀 Report generation started: ${reportId} (job: ${jobId})`);
-
-    return res.status(202).json({
+    return res.json({
       success: true,
-      reportId,
-      jobId,
-      status: 'generating',
+      data: updatedReport,
     });
   } catch (err) {
     console.error('❌ Generate report error:', err.message);
-    res.status(500).json({ error: 'Failed to start report generation' });
+
+    // Mark report as error
+    try {
+      await supabase
+        .from('reports')
+        .update({ status: 'error', error: err.message, updated_at: new Date().toISOString() })
+        .eq('id', req.params.reportId);
+    } catch (_) { /* ignore cleanup error */ }
+
+    res.status(500).json({ error: 'Failed to generate report', details: err.message });
   }
-});
-
-// ─────────────────────────────────────────────────────────────
-// GET /api/report/generate/status/:jobId — Poll generation progress
-// ─────────────────────────────────────────────────────────────
-router.get('/generate/status/:jobId', (req, res) => {
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-
-  const job = jobs.get(req.params.jobId);
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found or expired' });
-  }
-
-  const elapsed = Math.round((Date.now() - job.startedAt) / 1000);
-
-  return res.json({
-    status: job.status,
-    progress: job.progress || '',
-    sectionsCompleted: job.sectionsCompleted || 0,
-    sectionsTotal: job.sectionsTotal || 0,
-    elapsed,
-    reportId: job.reportId,
-    ...(job.status === 'failed' && { error: job.error }),
-  });
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -307,7 +275,9 @@ router.put('/:reportId/control-findings', async (req, res) => {
       if (override.score_override !== undefined) findings[idx].score_override = override.score_override;
       if (override.status_override !== undefined) findings[idx].status_override = override.status_override;
       if (override.user_notes !== undefined) findings[idx].user_notes = override.user_notes;
-      if (override.findings !== undefined) findings[idx].findings = override.findings;
+      if (override.concise_finding !== undefined) findings[idx].concise_finding = override.concise_finding;
+      if (override.concise_gap !== undefined) findings[idx].concise_gap = override.concise_gap;
+      if (override.concise_remediation !== undefined) findings[idx].concise_remediation = override.concise_remediation;
     }
 
     const { data, error } = await supabase
@@ -325,77 +295,6 @@ router.put('/:reportId/control-findings', async (req, res) => {
   } catch (err) {
     console.error('❌ Update control findings error:', err.message);
     res.status(500).json({ error: 'Failed to update control findings' });
-  }
-});
-
-// ─────────────────────────────────────────────────────────────
-// POST /api/report/:reportId/regenerate-section/:sectionId — Re-generate one AI section
-// ─────────────────────────────────────────────────────────────
-router.post('/:reportId/regenerate-section/:sectionId', async (req, res) => {
-  req.setTimeout(120000);
-  res.setTimeout(120000);
-
-  try {
-    const { reportId, sectionId } = req.params;
-
-    const { data: report, error: fetchErr } = await supabase
-      .from('reports')
-      .select('*')
-      .eq('id', reportId)
-      .single();
-
-    if (fetchErr || !report) {
-      return res.status(404).json({ error: 'Report not found' });
-    }
-
-    const section = report.sections.find(s => s.id === sectionId);
-    if (!section) {
-      return res.status(404).json({ error: 'Section not found' });
-    }
-
-    if (!section.ai_generated) {
-      return res.status(400).json({ error: 'This section is not AI-generated and cannot be regenerated' });
-    }
-
-    // Use existing snapshot if available, otherwise re-gather
-    const reportData = report.control_findings.length > 0
-      ? { framework: { name: report.framework_name || '' }, controlFindings: report.control_findings, evidenceManifest: report.evidence_manifest, reportType: report.report_type }
-      : await gatherReportData(report.project_id, report.framework_id);
-    reportData.reportType = report.report_type;
-
-    console.log(`🔄 Regenerating section: ${section.title} (${section.type})`);
-
-    const { result } = await generateSectionContent(section.type, reportData);
-
-    // Update the section content
-    if (section.type === 'executive_summary') {
-      section.content = result.executive_summary || '';
-      section.metadata = { key_findings: result.key_findings || [], risk_level: result.risk_level || 'medium' };
-    } else if (section.type === 'gap_analysis') {
-      section.content = result.gap_analysis || '';
-      section.metadata = { gap_categories: result.gap_categories || [], remediation_timeline: result.remediation_timeline || '' };
-    } else if (section.type === 'recommendations') {
-      section.content = result.recommendations_narrative || '';
-      section.metadata = { prioritized_actions: result.prioritized_actions || [] };
-    }
-
-    const { error: updateErr } = await supabase
-      .from('reports')
-      .update({ sections: report.sections, updated_at: new Date().toISOString() })
-      .eq('id', reportId);
-
-    if (updateErr) {
-      return res.status(500).json({ error: 'Failed to save regenerated section', details: updateErr.message });
-    }
-
-    return res.json({ success: true, section });
-  } catch (err) {
-    console.error('❌ Regenerate section error:', err.message);
-
-    const isRateLimit = err.status === 429 || err.message?.includes('429');
-    res.status(isRateLimit ? 429 : 500).json({
-      error: isRateLimit ? 'OpenAI rate limit exceeded. Please wait and try again.' : 'Failed to regenerate section',
-    });
   }
 });
 
@@ -424,6 +323,36 @@ router.get('/:reportId/export/html', async (req, res) => {
   } catch (err) {
     console.error('❌ Export HTML error:', err.message);
     res.status(500).json({ error: 'Failed to export report' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/report/:reportId/export/docx — Export Word document
+// ─────────────────────────────────────────────────────────────
+router.get('/:reportId/export/docx', async (req, res) => {
+  try {
+    const { data: report, error } = await supabase
+      .from('reports')
+      .select('*, framework:framework_id (id, name)')
+      .eq('id', req.params.reportId)
+      .single();
+
+    if (error || !report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    report.framework_name = report.framework?.name || '';
+
+    const buffer = await generateReportDocx(report);
+
+    const filename = report.title.replace(/[^a-zA-Z0-9 ]/g, '').trim();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}.docx"`);
+    res.setHeader('Content-Length', buffer.length);
+    return res.send(buffer);
+  } catch (err) {
+    console.error('❌ Export DOCX error:', err.message);
+    res.status(500).json({ error: 'Failed to export report as DOCX' });
   }
 });
 
