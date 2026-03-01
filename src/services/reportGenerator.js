@@ -107,6 +107,32 @@ function buildDefaultSections(reportType, scopeText) {
   }));
 }
 
+// ── Formatting helpers for report data ──
+
+/**
+ * Format an array of items as bullet-point string: "• item1\n• item2\n• item3"
+ * Caps at maxItems. Returns empty string if no items.
+ */
+function formatBulletList(items, maxItems = 3) {
+  if (!items || items.length === 0) return '';
+  return items
+    .slice(0, maxItems)
+    .map(item => `• ${item}`)
+    .join('\n');
+}
+
+/**
+ * Truncate text to at most maxSentences sentences.
+ * A sentence ends with . ! or ? followed by a space or end-of-string.
+ */
+function truncateToSentences(text, maxSentences = 2) {
+  if (!text) return '';
+  const sentencePattern = /[^.!?]*[.!?]/g;
+  const matches = text.match(sentencePattern);
+  if (!matches || matches.length <= maxSentences) return text.trim();
+  return matches.slice(0, maxSentences).join('').trim();
+}
+
 // ─────────────────────────────────────────────────────────────
 // Data Gathering — Assemble data from existing tables
 // Uses consolidated_analyses for concise findings/gaps/remediation
@@ -211,7 +237,17 @@ async function gatherReportData(projectId, frameworkId) {
     const evidenceFiles = [];
     const seenEvidence = new Set();
 
-    // From consolidated per_control_summary evidence_documents first
+    // Per-control consolidation: evidence_coverage[].document_name
+    if (conData?.evidence_coverage && Array.isArray(conData.evidence_coverage)) {
+      for (const ec of conData.evidence_coverage) {
+        if (ec.document_name && !seenEvidence.has(ec.document_name)) {
+          seenEvidence.add(ec.document_name);
+          evidenceFiles.push({ name: ec.document_name });
+        }
+      }
+    }
+
+    // Category-level consolidation: per_control_summary[].evidence_documents[]
     if (conData?.per_control_summary) {
       for (const pcs of conData.per_control_summary) {
         for (const docName of (pcs.evidence_documents || [])) {
@@ -241,31 +277,37 @@ async function gatherReportData(projectId, frameworkId) {
     let conciseRemediation = '';
 
     if (conData) {
+      // Priority: consolidated_summary → key_findings (per-control) → per_control_summary key_findings (category)
       conciseFinding = conData.consolidated_summary || '';
 
-      if (conData.per_control_summary && conData.per_control_summary.length > 0) {
+      if (!conciseFinding && conData.key_findings) {
+        conciseFinding = conData.key_findings;
+      }
+
+      if (!conciseFinding && conData.per_control_summary && conData.per_control_summary.length > 0) {
         const keyFindings = conData.per_control_summary
           .map(pcs => pcs.key_finding)
           .filter(Boolean);
-        if (keyFindings.length > 0 && !conciseFinding) {
+        if (keyFindings.length > 0) {
           conciseFinding = keyFindings.join(' ');
         }
       }
 
-      const gaps = conData.consolidated_gaps || [];
-      conciseGap = gaps.join('; ');
+      // Safety net: truncate to max 2 sentences
+      conciseFinding = truncateToSentences(conciseFinding, 2);
 
-      const recs = conData.consolidated_recommendations || [];
-      conciseRemediation = recs.join('; ');
+      // Format gaps and recommendations as bullet lists (max 3 items each)
+      conciseGap = formatBulletList(conData.consolidated_gaps || [], 3);
+      conciseRemediation = formatBulletList(conData.consolidated_recommendations || [], 3);
     } else if (resultsForControl.length > 0) {
       const summaries = resultsForControl.map(r => r.summary).filter(Boolean);
-      conciseFinding = summaries.join(' ').substring(0, 500);
+      conciseFinding = truncateToSentences(summaries.join(' '), 2);
 
       const allGaps = [...new Set(resultsForControl.flatMap(r => r.findings?.critical_gaps || []))];
-      conciseGap = allGaps.join('; ');
+      conciseGap = formatBulletList(allGaps, 3);
 
       const allRecs = [...new Set(resultsForControl.flatMap(r => r.recommendations || []))];
-      conciseRemediation = allRecs.join('; ');
+      conciseRemediation = formatBulletList(allRecs, 3);
     }
 
     return {
@@ -356,6 +398,26 @@ function escapeHtml(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/**
+ * Render text that may contain bullet points as HTML.
+ * If text contains "•" characters, splits on newline and renders as <ul><li>.
+ * Otherwise, renders as escaped plain text.
+ */
+function renderBulletHtml(text) {
+  if (!text) return '—';
+  if (text.includes('•')) {
+    const items = text.split('\n')
+      .map(line => line.replace(/^•\s*/, '').trim())
+      .filter(Boolean);
+    if (items.length > 0) {
+      return '<ul style="margin:0; padding-left:1.2em; list-style-type:disc;">'
+        + items.map(item => `<li>${escapeHtml(item)}</li>`).join('')
+        + '</ul>';
+    }
+  }
+  return escapeHtml(text);
+}
+
 function statusBadge(status) {
   const colors = { compliant: '#22c55e', partial: '#f59e0b', non_compliant: '#ef4444', not_assessed: '#9ca3af' };
   const labels = { compliant: 'Compliant', partial: 'Partial', non_compliant: 'Non-Compliant', not_assessed: 'Not Assessed' };
@@ -393,8 +455,8 @@ function renderFindingsTableInner(findings, columnConfig) {
         case 'title': return `<td>${escapeHtml(f.title)}</td>`;
         case 'evidence': return `<td class="evidence-list">${f.evidence_files.map(e => escapeHtml(e.name)).join('<br>') || '—'}</td>`;
         case 'findings': return `<td>${escapeHtml(f.concise_finding || '—')}</td>`;
-        case 'gaps': return `<td>${escapeHtml(f.concise_gap || '—')}</td>`;
-        case 'recommendations': return `<td>${escapeHtml(f.concise_remediation || '—')}</td>`;
+        case 'gaps': return `<td>${renderBulletHtml(f.concise_gap)}</td>`;
+        case 'recommendations': return `<td>${renderBulletHtml(f.concise_remediation)}</td>`;
         case 'score': {
           const override = f.score_override != null;
           const display = override ? f.score_override : (f.scoring_criteria?.display_score || 'N/A');
@@ -622,6 +684,8 @@ function generateReportHtml(report) {
     .findings-table td { padding: 0.6rem; border-bottom: 1px solid #e5e7eb; vertical-align: top; word-break: break-word; }
     .findings-table tr:nth-child(even) { background: #f9fafb; }
     .evidence-list { font-size: 0.8rem; color: #6b7280; }
+    .findings-table td ul { margin: 0; padding-left: 1.2em; }
+    .findings-table td li { margin-bottom: 0.15em; font-size: 0.8rem; }
     .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #e5e7eb; font-size: 0.75rem; color: #9ca3af; text-align: center; }
     .category-header { page-break-before: auto; }
     @media print {
@@ -723,6 +787,42 @@ function docxCell(text, options = {}) {
   });
 }
 
+/**
+ * Create a DOCX TableCell with multiple paragraphs for bullet-point text.
+ * If text contains "•", splits into separate bullet paragraphs.
+ * Otherwise, falls back to a single-paragraph cell via docxCell().
+ */
+function docxBulletCell(text, options = {}) {
+  if (!text || !text.includes('•')) {
+    return docxCell(text, options);
+  }
+
+  const items = text.split('\n')
+    .map(line => line.replace(/^•\s*/, '').trim())
+    .filter(Boolean);
+
+  if (items.length === 0) {
+    return docxCell('—', options);
+  }
+
+  const paragraphs = items.map(item =>
+    new Paragraph({
+      children: [
+        new TextRun({ text: '•  ', size: 18, font: 'Calibri' }),
+        new TextRun({ text: item, size: 18, font: 'Calibri', ...options }),
+      ],
+      spacing: { after: 40 },
+    })
+  );
+
+  return new TableCell({
+    shading: options.shading ? { type: ShadingType.SOLID, color: options.shading } : undefined,
+    margins: { top: 40, bottom: 40, left: 80, right: 80 },
+    width: options.widthTwips ? { size: options.widthTwips, type: WidthType.DXA } : undefined,
+    children: paragraphs,
+  });
+}
+
 // ── Findings table (shared by flat and grouped) ──
 
 function buildFindingsDocxTable(findings, columnConfig) {
@@ -750,8 +850,8 @@ function buildFindingsDocxTable(findings, columnConfig) {
         case 'title': return docxCell(f.title, { shading: rowShading, widthTwips: w });
         case 'evidence': return docxCell(f.evidence_files.map(e => e.name).join(', ') || '—', { size: 16, color: '6b7280', shading: rowShading, widthTwips: w });
         case 'findings': return docxCell(f.concise_finding || '—', { shading: rowShading, widthTwips: w });
-        case 'gaps': return docxCell(f.concise_gap || '—', { shading: rowShading, widthTwips: w });
-        case 'recommendations': return docxCell(f.concise_remediation || '—', { shading: rowShading, widthTwips: w });
+        case 'gaps': return docxBulletCell(f.concise_gap || '—', { shading: rowShading, widthTwips: w });
+        case 'recommendations': return docxBulletCell(f.concise_remediation || '—', { shading: rowShading, widthTwips: w });
         case 'score': {
           const display = f.score_override != null ? String(f.score_override) : (f.scoring_criteria?.display_score || 'N/A');
           return docxCell(display, { bold: true, shading: rowShading, widthTwips: w });

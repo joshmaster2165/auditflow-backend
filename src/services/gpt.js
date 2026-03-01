@@ -1111,11 +1111,15 @@ Rules:
 - Assess each document's relevance: "high" if it directly addresses control requirements, "medium" if it partially or indirectly addresses them, "low" if it has minimal relevance
 - If multiple documents address the same requirement, note the strongest evidence source
 - Do NOT invent findings — only consolidate what the individual analyses found
-- Be concise but thorough
 - Use relaxed scoring thresholds: "compliant" when compliance >= 80%, "partial" when 40-79%, "non_compliant" when < 40%
 - When evidence from multiple documents covers a requirement through reasonable inference, score generously
-- Use **bold** for key terms and _italic_ for document names in all free-text fields
-- Keep text concise: consolidated_summary (2-3 sentences), key_findings (1-2 paragraphs), recommendations (1 sentence each)
+- Do NOT use markdown formatting (no **bold**, no _italic_, no headers). Return plain text only in all fields.
+- consolidated_summary: EXACTLY 2 sentences max. State factual observations only. Reference document names only if directly relevant. No filler.
+- consolidated_gaps: MAX 3 items. Each item starts with sub-control ID if applicable (e.g., "CC4.1 — No evidence of annual testing cadence"). Be direct, no filler words.
+- consolidated_recommendations: MAX 3 items. Each item starts with an action verb. Be specific and actionable (e.g., "Establish a formal annual penetration testing schedule").
+- key_findings: 1 paragraph max, 3-4 sentences.
+- Do NOT repeat the control title in any field.
+- Do NOT exceed the limits above.
 
 You must respond with valid JSON only.`;
 
@@ -1145,7 +1149,7 @@ function buildPerControlConsolidationPrompt(analyses, controlContext) {
 {
   "overall_status": "compliant" | "partial" | "non_compliant",
   "overall_compliance_percentage": <0-100>,
-  "consolidated_summary": "<2-3 sentence executive summary referencing key documents>",
+  "consolidated_summary": "<max 2 sentences: factual observations, reference doc names only if directly relevant>",
   "evidence_coverage": [
     {
       "document_name": "<exact filename>",
@@ -1153,9 +1157,9 @@ function buildPerControlConsolidationPrompt(analyses, controlContext) {
       "key_contribution": "<1 sentence describing what this document evidences for this control>"
     }
   ],
-  "consolidated_gaps": ["<gap description referencing what is still missing>"],
-  "consolidated_recommendations": ["<actionable recommendation>"],
-  "key_findings": "<paragraph summarizing the most important findings across all evidence>"
+  "consolidated_gaps": ["<max 3 items, prefix with sub-control ID if applicable, e.g. 'CC4.1 — No evidence of X'>"],
+  "consolidated_recommendations": ["<max 3 items, start each with action verb, e.g. 'Establish a formal...'>"],
+  "key_findings": "<1 paragraph max summarizing the most important findings across all evidence>"
 }`;
 
   return prompt;
