@@ -1095,4 +1095,109 @@ async function consolidateAnalyses(analyses, controlContext) {
   }
 }
 
-module.exports = { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, consolidateAnalyses, SYSTEM_PROMPT };
+// ── Per-Control Consolidation (multiple evidence docs → one control) ──
+
+const PER_CONTROL_CONSOLIDATION_SYSTEM_PROMPT = `You are a senior compliance auditor producing a per-control evidence consolidation report. You will receive individual analysis results from multiple evidence documents that were each analyzed against the SAME control requirement.
+
+Your job is to synthesize ALL individual document analyses into ONE unified report that:
+1. Provides an overall compliance status and percentage for this single control based on all available evidence
+2. Summarizes key findings, citing specific document names as references
+3. Assesses each document's relevance and contribution to demonstrating compliance
+4. Identifies gaps that persist even after considering all available evidence
+5. Provides prioritized, actionable recommendations to close remaining gaps
+
+Rules:
+- Always reference documents by their exact filename
+- Assess each document's relevance: "high" if it directly addresses control requirements, "medium" if it partially or indirectly addresses them, "low" if it has minimal relevance
+- If multiple documents address the same requirement, note the strongest evidence source
+- Do NOT invent findings — only consolidate what the individual analyses found
+- Be concise but thorough
+- Use relaxed scoring thresholds: "compliant" when compliance >= 80%, "partial" when 40-79%, "non_compliant" when < 40%
+- When evidence from multiple documents covers a requirement through reasonable inference, score generously
+- Use **bold** for key terms and _italic_ for document names in all free-text fields
+- Keep text concise: consolidated_summary (2-3 sentences), key_findings (1-2 paragraphs), recommendations (1 sentence each)
+
+You must respond with valid JSON only.`;
+
+function buildPerControlConsolidationPrompt(analyses, controlContext) {
+  let prompt = `## Control Under Assessment\n`;
+  prompt += `Control: ${controlContext.control_number || 'N/A'} — ${controlContext.title || 'Untitled'}\n`;
+  if (controlContext.description) {
+    prompt += `Description: ${controlContext.description}\n`;
+  }
+
+  prompt += `\n## Individual Document Analysis Results (${analyses.length} documents)\n\n`;
+
+  for (const a of analyses) {
+    prompt += `### Document: ${a.evidence_name}\n`;
+    prompt += `- Status: ${a.status} | Compliance: ${a.compliance_percentage}%\n`;
+    prompt += `- Summary: ${a.summary || 'No summary'}\n`;
+    if (a.critical_gaps && a.critical_gaps.length > 0) {
+      prompt += `- Gaps: ${a.critical_gaps.join('; ')}\n`;
+    }
+    if (a.recommendations && a.recommendations.length > 0) {
+      prompt += `- Recommendations: ${a.recommendations.join('; ')}\n`;
+    }
+    prompt += `\n`;
+  }
+
+  prompt += `## Return JSON with this exact structure:
+{
+  "overall_status": "compliant" | "partial" | "non_compliant",
+  "overall_compliance_percentage": <0-100>,
+  "consolidated_summary": "<2-3 sentence executive summary referencing key documents>",
+  "evidence_coverage": [
+    {
+      "document_name": "<exact filename>",
+      "relevance": "high" | "medium" | "low",
+      "key_contribution": "<1 sentence describing what this document evidences for this control>"
+    }
+  ],
+  "consolidated_gaps": ["<gap description referencing what is still missing>"],
+  "consolidated_recommendations": ["<actionable recommendation>"],
+  "key_findings": "<paragraph summarizing the most important findings across all evidence>"
+}`;
+
+  return prompt;
+}
+
+async function consolidateControlAnalyses(analyses, controlContext) {
+  console.log(`🔗 Consolidating ${analyses.length} document analyses for control ${controlContext.control_number}...`);
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: GPT_MODEL,
+      messages: [
+        { role: 'system', content: PER_CONTROL_CONSOLIDATION_SYSTEM_PROMPT },
+        { role: 'user', content: buildPerControlConsolidationPrompt(analyses, controlContext) },
+      ],
+      temperature: GPT_TEMPERATURE,
+      max_completion_tokens: GPT_MAX_TOKENS,
+      response_format: { type: 'json_object' },
+    });
+
+    const choice = response.choices[0];
+    let result;
+
+    try {
+      result = JSON.parse(choice.message.content);
+    } catch (parseErr) {
+      console.error('❌ Failed to parse GPT per-control consolidation response as JSON');
+      throw new Error('GPT returned invalid JSON response during per-control consolidation');
+    }
+
+    console.log(`✅ Per-control consolidation complete — overall: ${result.overall_status} (${result.overall_compliance_percentage}%)`);
+
+    return {
+      result,
+      model: response.model,
+      usage: response.usage,
+      finish_reason: choice.finish_reason,
+      truncated: choice.finish_reason === 'length',
+    };
+  } catch (err) {
+    handleOpenAIError(err);
+  }
+}
+
+module.exports = { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, consolidateAnalyses, consolidateControlAnalyses, SYSTEM_PROMPT };

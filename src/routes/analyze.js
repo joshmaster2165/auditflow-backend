@@ -5,7 +5,7 @@ const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/
 const fs = require('fs');
 const { parseDocument, parseDocumentForViewer, isImageType } = require('../services/documentParser');
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
-const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, consolidateAnalyses, SYSTEM_PROMPT } = require('../services/gpt');
+const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, consolidateAnalyses, consolidateControlAnalyses, SYSTEM_PROMPT } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore } = require('../utils/analysisHelpers');
@@ -1348,6 +1348,202 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     });
   } finally {
     tempFiles.forEach(f => cleanupFile(f));
+  }
+});
+
+// ── POST /api/analyze/consolidate-control/:controlId — Consolidate multi-evidence analyses for ONE control ──
+router.post('/consolidate-control/:controlId', async (req, res) => {
+  req.setTimeout(120000);
+  res.setTimeout(120000);
+
+  try {
+    const { controlId } = req.params;
+    const { projectId, evidenceIds } = req.body || {};
+
+    console.log(`\n🔗 Starting PER-CONTROL CONSOLIDATION for control: ${controlId}`);
+
+    if (!projectId) {
+      return res.status(400).json({ error: 'projectId is required in the request body' });
+    }
+
+    // 1. Fetch the control
+    const { data: control, error: controlError } = await supabase
+      .from('controls')
+      .select('*, frameworks:framework_id (*)')
+      .eq('id', controlId)
+      .single();
+
+    if (controlError || !control) {
+      return res.status(404).json({ error: 'Control not found', details: controlError?.message });
+    }
+
+    // 2. Fetch analysis_results for this single control
+    let query = supabase
+      .from('analysis_results')
+      .select('*, evidence:evidence_id (id, file_name), control:control_id (id, control_number, title)')
+      .eq('control_id', controlId)
+      .eq('project_id', projectId)
+      .not('status', 'eq', 'error')
+      .not('status', 'eq', 'pending')
+      .order('analyzed_at', { ascending: false });
+
+    // Optionally filter by specific evidence IDs
+    if (evidenceIds && Array.isArray(evidenceIds) && evidenceIds.length > 0) {
+      query = query.in('evidence_id', evidenceIds);
+    }
+
+    const { data: allResults, error: resultsError } = await query;
+
+    if (resultsError) {
+      return res.status(500).json({ error: 'Failed to fetch analysis results', details: resultsError.message });
+    }
+
+    if (!allResults || allResults.length === 0) {
+      return res.status(400).json({
+        error: 'No analyses found to consolidate for this control. Run evidence analysis first.',
+      });
+    }
+
+    // 3. Deduplicate — keep latest per evidence_id (control_id is fixed)
+    const seen = new Map();
+    for (const r of allResults) {
+      const key = r.evidence_id;
+      if (!seen.has(key)) {
+        seen.set(key, r);
+      }
+    }
+    const dedupedResults = Array.from(seen.values());
+
+    console.log(`📊 Found ${dedupedResults.length} unique document analyses to consolidate for control ${control.control_number}`);
+
+    // 4. Build condensed input for GPT
+    const condensed = dedupedResults.map(r => ({
+      evidence_name: r.evidence?.file_name || 'Unknown document',
+      status: r.status,
+      compliance_percentage: r.compliance_percentage || 0,
+      summary: r.summary || '',
+      critical_gaps: r.findings?.critical_gaps || [],
+      recommendations: r.recommendations || [],
+    }));
+
+    // 5. Call GPT per-control consolidation
+    const consolidation = await consolidateControlAnalyses(condensed, {
+      control_number: control.control_number,
+      title: control.title,
+      description: control.description,
+    });
+
+    // 6. Collect unique document names
+    const uniqueDocs = new Set(condensed.map(c => c.evidence_name));
+
+    console.log(`✅ Per-control consolidation complete — ${uniqueDocs.size} documents`);
+
+    // 7. Save to consolidated_analyses (upsert — one per control+project)
+    const upsertRecord = {
+      parent_control_id: controlId,
+      project_id: projectId,
+      overall_status: consolidation.result.overall_status || 'partial',
+      overall_compliance_percentage: consolidation.result.overall_compliance_percentage || 0,
+      consolidated_data: consolidation.result,
+      source_analyses_count: dedupedResults.length,
+      controls_covered: 1,
+      documents_referenced: uniqueDocs.size,
+      model_used: consolidation.model || 'gpt-5.1',
+      tokens_used: consolidation.usage || {},
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data: savedRecord, error: saveError } = await supabase
+      .from('consolidated_analyses')
+      .upsert(upsertRecord, { onConflict: 'parent_control_id,project_id' })
+      .select()
+      .single();
+
+    if (saveError) {
+      console.warn('⚠️ Failed to save per-control consolidation (returning result anyway):', saveError.message);
+    } else {
+      console.log(`💾 Saved per-control consolidation: ${savedRecord.id}`);
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: savedRecord?.id || null,
+        consolidated: consolidation.result,
+        source_analyses_count: dedupedResults.length,
+        controls_covered: 1,
+        documents_referenced: uniqueDocs.size,
+        created_at: savedRecord?.created_at || null,
+        updated_at: savedRecord?.updated_at || null,
+        metadata: {
+          model: consolidation.model || 'gpt-5.1',
+          tokens_used: consolidation.usage || {},
+          truncated: consolidation.truncated || false,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('❌ Per-control consolidation error:', err.message);
+
+    const isRateLimit = err.status === 429
+      || err.message?.includes('429')
+      || err.message?.toLowerCase().includes('rate limit');
+
+    res.status(isRateLimit ? 429 : 500).json({
+      error: isRateLimit
+        ? 'OpenAI rate limit exceeded. Please wait a minute and try again.'
+        : 'Per-control consolidation failed',
+      details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    });
+  }
+});
+
+// ── GET /api/analyze/consolidate-control/:controlId — Retrieve saved per-control consolidation ──
+router.get('/consolidate-control/:controlId', async (req, res) => {
+  try {
+    const { controlId } = req.params;
+    const { projectId } = req.query;
+
+    let query = supabase
+      .from('consolidated_analyses')
+      .select('*')
+      .eq('parent_control_id', controlId);
+
+    if (projectId) {
+      query = query.eq('project_id', projectId);
+    } else {
+      query = query.is('project_id', null);
+    }
+
+    const { data: record, error } = await query.maybeSingle();
+
+    if (error) {
+      return res.status(500).json({ error: 'Failed to fetch per-control consolidation', details: error.message });
+    }
+
+    if (!record) {
+      return res.json({ success: true, data: null });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        id: record.id,
+        consolidated: record.consolidated_data,
+        source_analyses_count: record.source_analyses_count,
+        controls_covered: record.controls_covered,
+        documents_referenced: record.documents_referenced,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        metadata: {
+          model: record.model_used,
+          tokens_used: record.tokens_used,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('❌ Fetch per-control consolidation error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch per-control consolidation' });
   }
 });
 
