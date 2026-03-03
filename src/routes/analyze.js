@@ -5,7 +5,7 @@ const { supabase, downloadFile, cleanupFile, getSignedUrl } = require('../utils/
 const fs = require('fs');
 const { parseDocument, parseDocumentForViewer, isImageType } = require('../services/documentParser');
 const { verifyAndBuildHighlightRanges } = require('../utils/passageMatcher');
-const { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, consolidateAnalyses, consolidateControlAnalyses, SYSTEM_PROMPT } = require('../services/gpt');
+const { analyzeEvidence, analyzeImageEvidence, analyzeScannedPdfEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, consolidateAnalyses, consolidateControlAnalyses, SYSTEM_PROMPT } = require('../services/gpt');
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore } = require('../utils/analysisHelpers');
@@ -113,13 +113,13 @@ router.post('/evidence/:evidenceId', async (req, res) => {
     // 5. Fetch project-level custom instructions
     const customInstructions = await fetchCustomInstructions(evidence.project_id);
 
-    // 6. Branch: Image vs Text analysis
+    // 6. Branch: Image vs Text vs Scanned PDF analysis
     let gptResult;
     let diffData;
 
     if (isImageType(mimeType)) {
       // ── IMAGE ANALYSIS PATH ──
-      console.log(`🖼️ Image evidence detected (${mimeType}) — using GPT-4o vision`);
+      console.log(`🖼️ Image evidence detected (${mimeType}) — using GPT vision`);
       const imageBase64 = fs.readFileSync(tempFilePath).toString('base64');
 
       // Size guard: reject images over 20MB base64
@@ -134,10 +134,24 @@ router.post('/evidence/:evidenceId', async (req, res) => {
       diffData.extracted_text = gptResult.analysis.extracted_text || '';
       diffData.is_image = true;
     } else {
-      // ── TEXT ANALYSIS PATH (existing) ──
-      const documentText = await parseDocument(tempFilePath, mimeType);
-      gptResult = await analyzeEvidence(documentText, requirementText, controlName, customInstructions);
-      diffData = generateDiff(gptResult.analysis, requirementText);
+      // ── TEXT / SCANNED PDF PATH ──
+      const parseResult = await parseDocument(tempFilePath, mimeType);
+
+      if (parseResult.type === 'scanned_pdf') {
+        // ── SCANNED PDF: send page images to GPT vision ──
+        console.log(`📸 Scanned PDF detected — analyzing ${parseResult.pages.length} page image(s) via GPT vision`);
+        gptResult = await analyzeScannedPdfEvidence(
+          parseResult.pages, requirementText, controlName, customInstructions
+        );
+        diffData = generateDiff(gptResult.analysis, requirementText);
+        diffData.extracted_text = gptResult.analysis.extracted_text || '';
+        diffData.is_scanned_pdf = true;
+        diffData.pages_analyzed = parseResult.pages.length;
+      } else {
+        // ── NORMAL TEXT PATH ──
+        gptResult = await analyzeEvidence(parseResult.text, requirementText, controlName, customInstructions);
+        diffData = generateDiff(gptResult.analysis, requirementText);
+      }
     }
 
     // 7. Store results in analysis_results table
@@ -1086,7 +1100,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       });
     }
 
-    // 4. Download and parse all evidence (dedupe by file_path) — separate text and images
+    // 4. Download and parse all evidence (dedupe by file_path) — separate text, images, and scanned PDFs
     const seenPaths = new Set();
     const parsedDocs = [];
     const parsedImages = [];
@@ -1102,11 +1116,23 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         const mimeType = ev.file_type || 'text/plain';
 
         if (isImageType(mimeType)) {
+          // Native image file — single image
           const imageBase64 = fs.readFileSync(tempPath).toString('base64');
           parsedImages.push({ evidence: ev, base64: imageBase64, mimeType });
         } else {
-          const text = await parseDocument(tempPath, mimeType);
-          parsedDocs.push({ evidence: ev, text });
+          const parseResult = await parseDocument(tempPath, mimeType);
+
+          if (parseResult.type === 'scanned_pdf') {
+            // Scanned PDF — treat as multi-page image evidence
+            parsedImages.push({
+              evidence: ev,
+              pages: parseResult.pages,
+              mimeType: 'image/png',
+              isScannedPdf: true,
+            });
+          } else if (parseResult.type === 'text') {
+            parsedDocs.push({ evidence: ev, text: parseResult.text });
+          }
         }
       } catch (parseErr) {
         console.error(`❌ Failed to parse ${ev.file_name}: ${parseErr.message}`);
@@ -1140,7 +1166,14 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     //    This produces M×N results (one per evidence-control pair)
     const allParsedEvidence = [
       ...parsedDocs.map(d => ({ evidence: d.evidence, text: d.text, isImage: false })),
-      ...parsedImages.map(d => ({ evidence: d.evidence, base64: d.base64, mimeType: d.mimeType, isImage: true })),
+      ...parsedImages.map(d => ({
+        evidence: d.evidence,
+        base64: d.base64 || null,
+        mimeType: d.mimeType,
+        isImage: true,
+        isScannedPdf: d.isScannedPdf || false,
+        pages: d.pages || null,
+      })),
     ];
 
     const results = [];
@@ -1156,15 +1189,35 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
         let gptResult;
 
         if (parsed.isImage) {
-          // ── IMAGE EVIDENCE: vision API with all controls ──
-          const textPrompt = buildAnalyzeAllPrompt(
-            '(Image evidence — see attached image)', controlsList, customInstructions, [ev.file_name]
-          );
-          const contentParts = [
-            { type: 'text', text: textPrompt },
-            { type: 'text', text: `\n=== IMAGE EVIDENCE: ${ev.file_name} ===` },
-            { type: 'image_url', image_url: { url: `data:${parsed.mimeType};base64,${parsed.base64}`, detail: 'high' } },
-          ];
+          // ── IMAGE / SCANNED PDF EVIDENCE: vision API with all controls ──
+          let contentParts;
+
+          if (parsed.isScannedPdf && parsed.pages) {
+            // Scanned PDF: multiple page images
+            const textPrompt = buildAnalyzeAllPrompt(
+              '(Scanned PDF evidence — see attached page images)', controlsList, customInstructions, [ev.file_name]
+            );
+            contentParts = [
+              { type: 'text', text: textPrompt },
+              { type: 'text', text: `\n=== SCANNED PDF EVIDENCE: ${ev.file_name} (${parsed.pages.length} pages) ===` },
+            ];
+            for (const page of parsed.pages) {
+              contentParts.push({
+                type: 'image_url',
+                image_url: { url: `data:${page.mimeType};base64,${page.base64}`, detail: 'high' },
+              });
+            }
+          } else {
+            // Single native image
+            const textPrompt = buildAnalyzeAllPrompt(
+              '(Image evidence — see attached image)', controlsList, customInstructions, [ev.file_name]
+            );
+            contentParts = [
+              { type: 'text', text: textPrompt },
+              { type: 'text', text: `\n=== IMAGE EVIDENCE: ${ev.file_name} ===` },
+              { type: 'image_url', image_url: { url: `data:${parsed.mimeType};base64,${parsed.base64}`, detail: 'high' } },
+            ];
+          }
 
           const OpenAI = require('openai');
           const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY, maxRetries: 0 });

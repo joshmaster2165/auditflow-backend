@@ -171,8 +171,18 @@ async function executeGroupAnalysisLoop({ jobId, evidence, childControls, jobs, 
       imageContent = { base64: imageBase64, mimeType };
       console.log(`🖼️ [${logPrefix}] Image evidence (${Math.round(imageBase64.length / 1024)}KB base64)`);
     } else {
-      documentText = await parseDocument(tempFilePath, mimeType);
-      console.log(`📄 [${logPrefix}] Document parsed: ${documentText.length} chars`);
+      const parseResult = await parseDocument(tempFilePath, mimeType);
+
+      if (parseResult.type === 'scanned_pdf') {
+        // Scanned PDF — use first page as image for per-control sequential analysis
+        // (sending all pages for each of N controls would be very expensive)
+        const firstPage = parseResult.pages[0];
+        imageContent = { base64: firstPage.base64, mimeType: firstPage.mimeType };
+        console.log(`📸 [${logPrefix}] Scanned PDF detected (${parseResult.pages.length} pages) — using first page for per-control analysis`);
+      } else if (parseResult.type === 'text') {
+        documentText = parseResult.text;
+        console.log(`📄 [${logPrefix}] Document parsed: ${documentText.length} chars`);
+      }
     }
 
     // Analyze each control sequentially

@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
+const { pdfToPng } = require('pdf-to-png-converter');
 
 const SUPPORTED_TYPES = {
   'application/pdf': 'pdf',
@@ -13,6 +14,9 @@ const SUPPORTED_TYPES = {
   'image/gif': 'image',
 };
 
+// Maximum pages to convert from a scanned PDF for vision analysis
+const SCANNED_PDF_MAX_PAGES = 10;
+
 /**
  * Check if a MIME type is an image that requires vision-based analysis.
  * @param {string} mimeType
@@ -22,6 +26,48 @@ function isImageType(mimeType) {
   return SUPPORTED_TYPES[mimeType] === 'image';
 }
 
+/**
+ * Convert a scanned/image-based PDF into PNG page images for GPT vision analysis.
+ * Uses pdfjs-dist (via pdf-to-png-converter) with OffscreenCanvas — no native deps.
+ *
+ * @param {string} filePath - Path to the PDF file
+ * @param {number} maxPages - Maximum number of pages to convert (default: 10)
+ * @returns {Promise<Array<{ pageNumber: number, base64: string, mimeType: string }>>}
+ */
+async function convertPdfToImages(filePath, maxPages = SCANNED_PDF_MAX_PAGES) {
+  const dataBuffer = fs.readFileSync(filePath);
+  const pagesToProcess = Array.from({ length: maxPages }, (_, i) => i + 1);
+
+  console.log(`🔄 Converting scanned PDF to images (up to ${maxPages} pages, scale 2.0x)...`);
+
+  const pngPages = await pdfToPng(dataBuffer, {
+    pagesToProcess,
+    viewportScale: 2.0,
+    strictPagesToProcess: false, // Skip page numbers beyond actual page count
+    disableFontFace: true,
+  });
+
+  console.log(`✅ Converted ${pngPages.length} PDF page(s) to PNG images`);
+
+  return pngPages.map(page => ({
+    pageNumber: page.pageNumber,
+    base64: page.content.toString('base64'),
+    mimeType: 'image/png',
+  }));
+}
+
+/**
+ * Parse a document and return a structured result.
+ *
+ * Return shapes:
+ *   { type: 'text', text: string }         — normal text-based document
+ *   { type: 'scanned_pdf', pages: Array }  — scanned PDF converted to page images
+ *   { type: 'image' }                      — native image file (caller routes to vision API)
+ *
+ * @param {string} filePath - Path to the downloaded temp file
+ * @param {string} mimeType - File MIME type
+ * @returns {Promise<{ type: string, text?: string, pages?: Array }>}
+ */
 async function parseDocument(filePath, mimeType) {
   console.log(`📝 Parsing document: ${path.basename(filePath)} (${mimeType})`);
 
@@ -46,22 +92,37 @@ async function parseDocument(filePath, mimeType) {
         text = await parseText(filePath);
         break;
       case 'image':
-        // Images cannot be text-parsed locally — return null to signal
-        // the caller should use GPT-4o vision API instead
+        // Images cannot be text-parsed locally — signal caller to use vision API
         console.log(`🖼️ Image file detected (${mimeType}) — requires vision analysis`);
-        return null;
+        return { type: 'image' };
     }
   } catch (err) {
     throw new Error(`Failed to parse ${type} file: ${err.message}`);
   }
 
   if (!text || text.trim().length === 0) {
-    console.warn('⚠️ Document text extraction returned empty content. This may be a scanned PDF or image-based document.');
-    throw new Error('No text content could be extracted from the document. It may be a scanned/image-based file.');
+    // ── SCANNED PDF FALLBACK ──
+    if (type === 'pdf') {
+      console.log('📸 PDF has no text layer — attempting scanned PDF conversion to images...');
+      try {
+        const pages = await convertPdfToImages(filePath);
+        if (pages.length === 0) {
+          throw new Error('PDF conversion produced no pages');
+        }
+        console.log(`📸 Scanned PDF: ${pages.length} page(s) converted to images for vision analysis`);
+        return { type: 'scanned_pdf', pages };
+      } catch (convErr) {
+        console.error(`❌ Scanned PDF conversion failed: ${convErr.message}`);
+        throw new Error('No text content could be extracted and PDF-to-image conversion failed. The file may be corrupted.');
+      }
+    }
+
+    console.warn('⚠️ Document text extraction returned empty content.');
+    throw new Error('No text content could be extracted from the document.');
   }
 
   console.log(`✅ Extracted ${text.length} characters from document`);
-  return text.trim();
+  return { type: 'text', text: text.trim() };
 }
 
 async function parsePdf(filePath) {
@@ -134,4 +195,4 @@ async function parseDocumentForViewer(filePath, mimeType) {
   return { html, text: text.trim(), fileType: type };
 }
 
-module.exports = { parseDocument, parseDocumentForViewer, isImageType };
+module.exports = { parseDocument, parseDocumentForViewer, isImageType, convertPdfToImages };

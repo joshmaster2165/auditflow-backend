@@ -513,6 +513,84 @@ async function analyzeImageEvidence(imageBase64, mimeType, requirementText, cont
   }
 }
 
+/**
+ * Analyze a scanned/image-based PDF by sending multiple page images to GPT vision.
+ * Performs OCR + compliance analysis in one call across all pages.
+ *
+ * @param {Array<{ pageNumber: number, base64: string, mimeType: string }>} pages
+ * @param {string} requirementText - The compliance requirement
+ * @param {string} controlName - Control title
+ * @param {string|null} customInstructions - Optional custom instructions
+ * @returns {{ analysis, model, usage, finish_reason }}
+ */
+async function analyzeScannedPdfEvidence(pages, requirementText, controlName, customInstructions) {
+  if (!pages || pages.length === 0) {
+    throw new Error('No page images provided for scanned PDF analysis');
+  }
+  if (!requirementText || requirementText.trim().length < 10) {
+    throw new Error('Requirement text is empty or too short for analysis');
+  }
+
+  const totalSizeKB = pages.reduce((sum, p) => sum + Math.round(p.base64.length / 1024), 0);
+  console.log(`📸 Sending ${pages.length} scanned PDF page(s) to GPT vision (${totalSizeKB}KB total base64)...`);
+
+  try {
+    const contentParts = [
+      { type: 'text', text: buildImageUserPrompt(requirementText, controlName, customInstructions) },
+      { type: 'text', text: `\nThis is a scanned PDF document with ${pages.length} page(s). Analyze ALL pages together as a single document. Extract all readable text and perform compliance analysis across the entire document.` },
+    ];
+
+    for (const page of pages) {
+      contentParts.push({
+        type: 'image_url',
+        image_url: {
+          url: `data:${page.mimeType};base64,${page.base64}`,
+          detail: 'high',
+        },
+      });
+    }
+
+    const response = await openai.chat.completions.create({
+      model: GPT_MODEL,
+      messages: [
+        { role: 'system', content: IMAGE_SYSTEM_PROMPT },
+        { role: 'user', content: contentParts },
+      ],
+      temperature: GPT_TEMPERATURE,
+      max_completion_tokens: GPT_MAX_TOKENS,
+      response_format: { type: 'json_object' },
+    });
+
+    const choice = response.choices[0];
+    if (choice.finish_reason === 'length') {
+      console.warn('⚠️ GPT vision response was truncated due to token limit.');
+    }
+
+    const content = choice.message.content;
+    let analysis;
+
+    try {
+      analysis = JSON.parse(content);
+    } catch (parseErr) {
+      console.error('❌ Failed to parse GPT vision response for scanned PDF:', content.substring(0, 200));
+      throw new Error('GPT returned invalid JSON for scanned PDF analysis');
+    }
+
+    normalizeGptAnalysis(analysis);
+
+    console.log(`✅ Scanned PDF analysis complete: ${analysis.status} (${analysis.compliance_percentage}%, OCR: ${(analysis.extracted_text || '').length} chars, ${pages.length} pages)`);
+
+    return {
+      analysis,
+      model: response.model,
+      usage: response.usage,
+      finish_reason: choice.finish_reason,
+    };
+  } catch (err) {
+    handleOpenAIError(err);
+  }
+}
+
 // ─────────────────────────────────────────────────────────────
 // Framework Extraction — extract controls from PDF documents
 // ─────────────────────────────────────────────────────────────
@@ -1200,4 +1278,4 @@ async function consolidateControlAnalyses(analyses, controlContext) {
   }
 }
 
-module.exports = { analyzeEvidence, analyzeImageEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, consolidateAnalyses, consolidateControlAnalyses, SYSTEM_PROMPT };
+module.exports = { analyzeEvidence, analyzeImageEvidence, analyzeScannedPdfEvidence, normalizeGptAnalysis, buildAnalyzeAllPrompt, extractFrameworkControls, extractControlsFromTabular, enhanceFrameworkControls, consolidateAnalyses, consolidateControlAnalyses, SYSTEM_PROMPT };
