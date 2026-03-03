@@ -188,7 +188,10 @@ async function parseDocumentForViewer(filePath, mimeType) {
   }
 
   if (!text || text.trim().length === 0) {
-    throw new Error('No text content could be extracted from the document.');
+    // Scanned/image-based PDFs have no extractable text — return empty gracefully
+    // so the frontend can still render the PDF visually via react-pdf
+    console.log(`📄 Viewer parse: no extractable text (${type}) — likely scanned/image-based document`);
+    return { html: null, text: '', fileType: type };
   }
 
   console.log(`📄 Viewer parse: ${text.length} chars text${html ? `, ${html.length} chars HTML` : ''} (${type})`);
