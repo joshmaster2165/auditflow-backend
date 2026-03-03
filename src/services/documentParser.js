@@ -2,11 +2,15 @@ const fs = require('fs');
 const path = require('path');
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
+const XLSX = require('xlsx');
 const { pdfToPng } = require('pdf-to-png-converter');
 
 const SUPPORTED_TYPES = {
   'application/pdf': 'pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'spreadsheet',
+  'application/vnd.ms-excel': 'spreadsheet',
+  'text/csv': 'spreadsheet',
   'text/plain': 'text',
   'image/png': 'image',
   'image/jpeg': 'image',
@@ -57,10 +61,81 @@ async function convertPdfToImages(filePath, maxPages = SCANNED_PDF_MAX_PAGES) {
 }
 
 /**
+ * Parse an XLSX, XLS, or CSV file into a plain-text representation for GPT analysis.
+ * Reads ALL sheets (evidence may span multiple tabs). Converts each sheet into a
+ * structured text format: "Row N: Col1: val1 | Col2: val2 | ..."
+ *
+ * @param {string} filePath - Path to the spreadsheet file
+ * @returns {string} Plain text representation of the spreadsheet data
+ */
+function parseSpreadsheet(filePath) {
+  const workbook = XLSX.readFile(filePath, {
+    type: 'file',
+    cellDates: true,   // Render dates as readable strings
+    raw: false,        // Apply number formatting
+  });
+
+  const textParts = [];
+
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    const jsonData = XLSX.utils.sheet_to_json(sheet, {
+      header: 1,
+      defval: '',
+      blankrows: false,
+    });
+
+    if (jsonData.length < 1) continue;
+
+    // Extract headers from first row
+    const headers = jsonData[0]
+      .map(h => String(h ?? '').trim())
+      .filter(h => h !== '');
+
+    if (headers.length === 0) continue;
+
+    // Build row objects
+    const rows = jsonData.slice(1)
+      .map(row => {
+        const obj = {};
+        headers.forEach((h, i) => {
+          obj[h] = (row[i] != null) ? String(row[i]).trim() : '';
+        });
+        return obj;
+      })
+      .filter(row => Object.values(row).some(v => v !== ''));
+
+    // Build text for this sheet
+    let sheetText = '';
+    if (workbook.SheetNames.length > 1) {
+      sheetText += `\n=== SHEET: ${sheetName} ===\n`;
+    }
+    sheetText += `Columns: ${headers.join(' | ')}\n`;
+    sheetText += `Rows: ${rows.length}\n\n`;
+
+    rows.forEach((row, i) => {
+      const fields = headers
+        .map(h => row[h] ? `${h}: ${row[h]}` : null)
+        .filter(Boolean)
+        .join(' | ');
+      sheetText += `Row ${i + 1}: ${fields}\n`;
+    });
+
+    textParts.push(sheetText);
+  }
+
+  const result = textParts.join('\n');
+  if (result) {
+    console.log(`📊 Parsed spreadsheet: ${workbook.SheetNames.length} sheet(s), ${result.length} chars text`);
+  }
+  return result;
+}
+
+/**
  * Parse a document and return a structured result.
  *
  * Return shapes:
- *   { type: 'text', text: string }         — normal text-based document
+ *   { type: 'text', text: string }         — normal text-based document (PDF, DOCX, TXT, XLSX, CSV)
  *   { type: 'scanned_pdf', pages: Array }  — scanned PDF converted to page images
  *   { type: 'image' }                      — native image file (caller routes to vision API)
  *
@@ -87,6 +162,9 @@ async function parseDocument(filePath, mimeType) {
         break;
       case 'docx':
         text = await parseDocx(filePath);
+        break;
+      case 'spreadsheet':
+        text = parseSpreadsheet(filePath);
         break;
       case 'text':
         text = await parseText(filePath);
@@ -175,6 +253,10 @@ async function parseDocumentForViewer(filePath, mimeType) {
     case 'pdf':
       // html stays null — frontend uses react-pdf for real PDF rendering
       text = await parsePdf(filePath);
+      break;
+    case 'spreadsheet':
+      // Convert spreadsheet to plain text for viewer display
+      text = parseSpreadsheet(filePath);
       break;
     case 'text':
       // html stays null — frontend renders plain text directly
