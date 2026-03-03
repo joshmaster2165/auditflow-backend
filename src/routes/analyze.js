@@ -1101,41 +1101,56 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     }
 
     // 4. Download and parse all evidence (dedupe by file_path) — separate text, images, and scanned PDFs
+    //    Downloads run in parallel for speed; parsing follows after each download completes.
     const seenPaths = new Set();
     const parsedDocs = [];
     const parsedImages = [];
 
+    // Deduplicate evidence files by path
+    const uniqueEvidence = [];
     for (const ev of evidenceFiles) {
       const evFilePath = ev.file_path;
       if (!evFilePath || seenPaths.has(evFilePath)) continue;
       seenPaths.add(evFilePath);
+      uniqueEvidence.push(ev);
+    }
 
-      try {
-        const tempPath = await downloadFile(evFilePath);
-        tempFiles.push(tempPath);
-        const mimeType = ev.file_type || 'text/plain';
+    // Download + parse all evidence files in parallel
+    const downloadAndParseResults = await Promise.all(
+      uniqueEvidence.map(async (ev) => {
+        try {
+          const tempPath = await downloadFile(ev.file_path);
+          tempFiles.push(tempPath);
+          const mimeType = ev.file_type || 'text/plain';
 
-        if (isImageType(mimeType)) {
-          // Native image file — single image
-          const imageBase64 = fs.readFileSync(tempPath).toString('base64');
-          parsedImages.push({ evidence: ev, base64: imageBase64, mimeType });
-        } else {
-          const parseResult = await parseDocument(tempPath, mimeType);
-
-          if (parseResult.type === 'scanned_pdf') {
-            // Scanned PDF — treat as multi-page image evidence
-            parsedImages.push({
-              evidence: ev,
-              pages: parseResult.pages,
-              mimeType: 'image/png',
-              isScannedPdf: true,
-            });
-          } else if (parseResult.type === 'text') {
-            parsedDocs.push({ evidence: ev, text: parseResult.text });
+          if (isImageType(mimeType)) {
+            const imageBase64 = fs.readFileSync(tempPath).toString('base64');
+            return { type: 'image', evidence: ev, base64: imageBase64, mimeType };
+          } else {
+            const parseResult = await parseDocument(tempPath, mimeType);
+            if (parseResult.type === 'scanned_pdf') {
+              return { type: 'scanned_pdf', evidence: ev, pages: parseResult.pages, mimeType: 'image/png' };
+            } else if (parseResult.type === 'text') {
+              return { type: 'text', evidence: ev, text: parseResult.text };
+            }
           }
+          return null;
+        } catch (parseErr) {
+          console.error(`❌ Failed to parse ${ev.file_name}: ${parseErr.message}`);
+          return null;
         }
-      } catch (parseErr) {
-        console.error(`❌ Failed to parse ${ev.file_name}: ${parseErr.message}`);
+      })
+    );
+
+    // Classify results into docs and images
+    for (const result of downloadAndParseResults) {
+      if (!result) continue;
+      if (result.type === 'image') {
+        parsedImages.push({ evidence: result.evidence, base64: result.base64, mimeType: result.mimeType });
+      } else if (result.type === 'scanned_pdf') {
+        parsedImages.push({ evidence: result.evidence, pages: result.pages, mimeType: result.mimeType, isScannedPdf: true });
+      } else if (result.type === 'text') {
+        parsedDocs.push({ evidence: result.evidence, text: result.text });
       }
     }
 
@@ -1177,8 +1192,9 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
     ];
 
     const results = [];
+    const allRecordsToInsert = [];
     let totalUsage = null;
-    const CONCURRENCY = 3;
+    const CONCURRENCY = 5;
 
     // Process evidence files in parallel batches of CONCURRENCY
     for (let batchStart = 0; batchStart < allParsedEvidence.length; batchStart += CONCURRENCY) {
@@ -1265,7 +1281,7 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
           }
         }
 
-        // Parse per-control results and save one row per evidence×control pair
+        // Parse per-control results — collect records for bulk DB insert after all GPT processing
         const gptControls = gptResult.analysis.controls || [];
         const pairResults = [];
 
@@ -1318,18 +1334,11 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
             },
           };
 
-          const { data: saved, error: saveError } = await supabase
-            .from('analysis_results')
-            .insert(analysisRecord)
-            .select()
-            .single();
-
-          if (saveError) {
-            console.error(`⚠️ DB save failed for ${child.control_number} × ${ev.file_name}: ${saveError.message}`);
-          }
+          // Collect record for bulk insert (instead of individual .insert() per row)
+          allRecordsToInsert.push(analysisRecord);
 
           pairResults.push({
-            analysis_id: saved?.id || null,
+            _bulkIndex: allRecordsToInsert.length - 1, // Track position for ID mapping after bulk insert
             control_id: child.id,
             evidence_id: ev.id,
             evidence_name: ev.file_name,
@@ -1350,6 +1359,28 @@ router.post('/analyze-all/:parentControlId', async (req, res) => {
       const batchResults = await Promise.all(batchPromises);
       for (const pairResults of batchResults) {
         results.push(...pairResults);
+      }
+    }
+
+    // 7b. Bulk insert all analysis records into DB (one call instead of N individual inserts)
+    if (allRecordsToInsert.length > 0) {
+      console.log(`💾 Bulk inserting ${allRecordsToInsert.length} analysis records...`);
+      const { data: savedRows, error: bulkError } = await supabase
+        .from('analysis_results')
+        .insert(allRecordsToInsert)
+        .select('id');
+
+      if (bulkError) {
+        console.error(`⚠️ Bulk DB insert failed: ${bulkError.message}`);
+      } else if (savedRows) {
+        // Map saved IDs back to results
+        for (const r of results) {
+          if (r._bulkIndex != null && savedRows[r._bulkIndex]) {
+            r.analysis_id = savedRows[r._bulkIndex].id;
+          }
+          delete r._bulkIndex;
+        }
+        console.log(`✅ Saved ${savedRows.length} analysis records to DB`);
       }
     }
 

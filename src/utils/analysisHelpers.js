@@ -2,7 +2,8 @@ const { supabase } = require('./supabase');
 const { analyzeEvidence, analyzeImageEvidence } = require('../services/gpt');
 const { generateDiff } = require('../services/diffGenerator');
 
-const RATE_LIMIT_RETRY_DELAY_MS = 60000;
+// Exponential backoff delays for rate-limit retries (1s → 2s → 4s)
+const RATE_LIMIT_DELAYS = [1000, 2000, 4000];
 
 /**
  * Build a standardized analysis_results DB record.
@@ -97,43 +98,51 @@ async function analyzeControlWithRetry({
       usage: gptResult.usage,
     };
   } catch (err) {
-    // Rate limit retry (once)
-    if (err.message?.includes('429') || err.message?.toLowerCase().includes('rate limit')) {
-      console.log(`\u23f3 [${logPrefix}] Rate limited. Waiting 60s before retrying ${control.control_number}...`);
-      await new Promise(r => setTimeout(r, RATE_LIMIT_RETRY_DELAY_MS));
+    // Exponential backoff retry for rate limits (1s → 2s → 4s)
+    const isRateLimit = err.message?.includes('429') || err.message?.toLowerCase().includes('rate limit');
+    if (isRateLimit) {
+      for (let attempt = 0; attempt < RATE_LIMIT_DELAYS.length; attempt++) {
+        const delay = RATE_LIMIT_DELAYS[attempt];
+        console.log(`⏳ [${logPrefix}] Rate limited. Retry ${attempt + 1}/${RATE_LIMIT_DELAYS.length} for ${control.control_number} in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
 
-      try {
-        const gptResult = await runAnalysis();
-        const diffData = generateDiff(gptResult.analysis, requirementText);
+        try {
+          const gptResult = await runAnalysis();
+          const diffData = generateDiff(gptResult.analysis, requirementText);
 
-        if (imageContent) {
-          diffData.extracted_text = gptResult.analysis.extracted_text || '';
-          diffData.is_image = true;
+          if (imageContent) {
+            diffData.extracted_text = gptResult.analysis.extracted_text || '';
+            diffData.is_image = true;
+          }
+
+          const record = buildAnalysisRecord({ evidenceId, controlId: control.id, projectId, gptResult, diffData });
+
+          const { data: saved, error: saveError } = await supabase
+            .from('analysis_results')
+            .insert(record)
+            .select()
+            .single();
+
+          console.log(`✅ [${logPrefix}] Retry ${attempt + 1} succeeded for ${control.control_number}`);
+          return {
+            analysis_id: saved?.id || null,
+            control_id: control.id,
+            control_number: control.control_number,
+            control_title: control.title,
+            status: gptResult.analysis.status,
+            compliance_percentage: gptResult.analysis.compliance_percentage,
+            confidence_score: gptResult.analysis.confidence_score,
+            summary: gptResult.analysis.summary,
+            save_error: saveError?.message || null,
+            usage: gptResult.usage,
+          };
+        } catch (retryErr) {
+          const stillRateLimited = retryErr.message?.includes('429') || retryErr.message?.toLowerCase().includes('rate limit');
+          if (stillRateLimited && attempt < RATE_LIMIT_DELAYS.length - 1) {
+            continue; // Try next backoff delay
+          }
+          console.error(`❌ [${logPrefix}] All retries exhausted for ${control.control_number}: ${retryErr.message}`);
         }
-
-        const record = buildAnalysisRecord({ evidenceId, controlId: control.id, projectId, gptResult, diffData });
-
-        const { data: saved, error: saveError } = await supabase
-          .from('analysis_results')
-          .insert(record)
-          .select()
-          .single();
-
-        console.log(`\u2705 [${logPrefix}] Retry succeeded for ${control.control_number}`);
-        return {
-          analysis_id: saved?.id || null,
-          control_id: control.id,
-          control_number: control.control_number,
-          control_title: control.title,
-          status: gptResult.analysis.status,
-          compliance_percentage: gptResult.analysis.compliance_percentage,
-          confidence_score: gptResult.analysis.confidence_score,
-          summary: gptResult.analysis.summary,
-          save_error: saveError?.message || null,
-          usage: gptResult.usage,
-        };
-      } catch (retryErr) {
-        console.error(`\u274c [${logPrefix}] Retry also failed for ${control.control_number}: ${retryErr.message}`);
       }
     }
 
