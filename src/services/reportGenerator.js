@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const { supabase } = require('../utils/supabase');
+const { parseMarkdownToDocxChildren, parseHtmlToDocxElements } = require('../utils/docxFormatters');
 const {
   Document,
   Packer,
@@ -723,6 +724,26 @@ function docxCell(text, options = {}) {
   });
 }
 
+/**
+ * Create a DOCX TableCell with rich markdown formatting (bold, italic, bullets).
+ * Parses **bold**, *italic*, _italic_, and - bullet lines into proper TextRuns/Paragraphs.
+ * Falls back to plain text if no markdown found.
+ */
+function docxRichCell(text, options = {}) {
+  const baseRunOptions = { size: 18, font: 'Calibri' };
+  if (options.color) baseRunOptions.color = options.color;
+  if (options.size) baseRunOptions.size = options.size;
+
+  const paragraphs = parseMarkdownToDocxChildren(text, baseRunOptions);
+
+  return new TableCell({
+    shading: options.shading ? { type: ShadingType.SOLID, color: options.shading } : undefined,
+    margins: { top: 40, bottom: 40, left: 80, right: 80 },
+    width: options.widthTwips ? { size: options.widthTwips, type: WidthType.DXA } : undefined,
+    children: paragraphs,
+  });
+}
+
 // ── Findings table (shared by flat and grouped) ──
 
 function buildFindingsDocxTable(findings, columnConfig) {
@@ -749,9 +770,9 @@ function buildFindingsDocxTable(findings, columnConfig) {
         case 'control_number': return docxCell(f.control_number, { bold: true, shading: rowShading, widthTwips: w });
         case 'title': return docxCell(f.title, { shading: rowShading, widthTwips: w });
         case 'evidence': return docxCell(f.evidence_files.map(e => e.name).join(', ') || '—', { size: 16, color: '6b7280', shading: rowShading, widthTwips: w });
-        case 'findings': return docxCell(f.concise_finding || '—', { shading: rowShading, widthTwips: w });
-        case 'gaps': return docxCell(f.concise_gap || '—', { shading: rowShading, widthTwips: w });
-        case 'recommendations': return docxCell(f.concise_remediation || '—', { shading: rowShading, widthTwips: w });
+        case 'findings': return docxRichCell(f.concise_finding || '—', { shading: rowShading, widthTwips: w });
+        case 'gaps': return docxRichCell(f.concise_gap || '—', { shading: rowShading, widthTwips: w });
+        case 'recommendations': return docxRichCell(f.concise_remediation || '—', { shading: rowShading, widthTwips: w });
         case 'score': {
           const display = f.score_override != null ? String(f.score_override) : (f.scoring_criteria?.display_score || 'N/A');
           return docxCell(display, { bold: true, shading: rowShading, widthTwips: w });
@@ -1047,13 +1068,8 @@ async function generateReportDocx(report) {
         contentChildren.push(docxSectionHeading(section.title));
         const content = section.content || '';
         if (content) {
-          const lines = content.split('\n').filter(l => l.trim());
-          for (const line of lines) {
-            contentChildren.push(new Paragraph({
-              spacing: { after: 100 },
-              children: [new TextRun({ text: line, size: 22, font: 'Calibri', color: '374151' })],
-            }));
-          }
+          const htmlParagraphs = parseHtmlToDocxElements(content, { size: 22, font: 'Calibri', color: '374151' });
+          contentChildren.push(...htmlParagraphs);
         } else {
           contentChildren.push(new Paragraph({ children: [new TextRun({ text: 'No content provided.', italics: true, size: 20, color: '9ca3af' })] }));
         }
