@@ -136,6 +136,18 @@ async function gatherReportData(projectId, frameworkId) {
 
   const controlIds = controls.map(c => c.id);
 
+  // Build parent lookup: for each child control, find its parent's ID
+  // so we can match consolidations stored under the parent
+  const parentLookup = new Map(); // childControlId → parentControlId
+  for (const ctrl of controls) {
+    if (ctrl.parent_control_number) {
+      const parent = controls.find(c => c.control_number === ctrl.parent_control_number);
+      if (parent) {
+        parentLookup.set(ctrl.id, parent.id);
+      }
+    }
+  }
+
   // 3. Fetch analysis results (dedup latest per control+evidence pair)
   const { data: allResults } = await supabase
     .from('analysis_results')
@@ -186,16 +198,32 @@ async function gatherReportData(projectId, frameworkId) {
   // 6. Build control findings — prefer consolidated data for concise fields
   const controlFindings = controls.map(control => {
     const resultsForControl = dedupedResults.filter(r => r.control_id === control.id);
-    const consolidation = (consolidations || []).find(c => c.parent_control_id === control.id);
+
+    // Match consolidation: check control's own ID first, then its parent's ID
+    const consolidation = (consolidations || []).find(c =>
+      c.parent_control_id === control.id ||
+      c.parent_control_id === parentLookup.get(control.id)
+    );
     const conData = consolidation?.consolidated_data || null;
 
-    // Status and compliance from consolidation first, then raw analysis
+    // For child controls, find their specific entry in per_control_summary
+    const myPcs = conData?.per_control_summary?.find(
+      pcs => pcs.control_number === control.control_number
+    ) || null;
+
+    // Status and compliance: child-specific → consolidation overall → raw analysis
     let status = 'not_assessed';
     let complianceScore = null;
 
     if (consolidation) {
-      status = consolidation.overall_status;
-      complianceScore = consolidation.overall_compliance_percentage;
+      if (myPcs) {
+        // Child-specific status from per_control_summary
+        status = myPcs.status || consolidation.overall_status;
+        complianceScore = myPcs.compliance_percentage ?? consolidation.overall_compliance_percentage;
+      } else {
+        status = consolidation.overall_status;
+        complianceScore = consolidation.overall_compliance_percentage;
+      }
     } else if (resultsForControl.length > 0) {
       const validResults = resultsForControl.filter(r => r.status !== 'error');
       if (validResults.length > 0) {
@@ -212,8 +240,16 @@ async function gatherReportData(projectId, frameworkId) {
     const evidenceFiles = [];
     const seenEvidence = new Set();
 
-    // From consolidated per_control_summary evidence_documents first
-    if (conData?.per_control_summary) {
+    // From child-specific per_control_summary evidence_documents
+    if (myPcs) {
+      for (const docName of (myPcs.evidence_documents || [])) {
+        if (!seenEvidence.has(docName)) {
+          seenEvidence.add(docName);
+          evidenceFiles.push({ name: docName });
+        }
+      }
+    } else if (conData?.per_control_summary) {
+      // Parent control — gather from all per_control_summary entries
       for (const pcs of conData.per_control_summary) {
         for (const docName of (pcs.evidence_documents || [])) {
           if (!seenEvidence.has(docName)) {
@@ -242,22 +278,30 @@ async function gatherReportData(projectId, frameworkId) {
     let conciseRemediation = '';
 
     if (conData) {
-      conciseFinding = conData.consolidated_summary || '';
+      if (myPcs) {
+        // Child-specific findings from per_control_summary
+        conciseFinding = myPcs.key_finding || myPcs.summary || conData.consolidated_summary || '';
+        conciseGap = (myPcs.gaps || myPcs.critical_gaps || []).join('; ');
+        conciseRemediation = (myPcs.recommendations || []).join('; ');
+      } else {
+        // Parent control — use consolidated summary
+        conciseFinding = conData.consolidated_summary || '';
 
-      if (conData.per_control_summary && conData.per_control_summary.length > 0) {
-        const keyFindings = conData.per_control_summary
-          .map(pcs => pcs.key_finding)
-          .filter(Boolean);
-        if (keyFindings.length > 0 && !conciseFinding) {
-          conciseFinding = keyFindings.join(' ');
+        if (conData.per_control_summary && conData.per_control_summary.length > 0) {
+          const keyFindings = conData.per_control_summary
+            .map(pcs => pcs.key_finding)
+            .filter(Boolean);
+          if (keyFindings.length > 0 && !conciseFinding) {
+            conciseFinding = keyFindings.join(' ');
+          }
         }
+
+        const gaps = conData.consolidated_gaps || [];
+        conciseGap = gaps.join('; ');
+
+        const recs = conData.consolidated_recommendations || [];
+        conciseRemediation = recs.join('; ');
       }
-
-      const gaps = conData.consolidated_gaps || [];
-      conciseGap = gaps.join('; ');
-
-      const recs = conData.consolidated_recommendations || [];
-      conciseRemediation = recs.join('; ');
     } else if (resultsForControl.length > 0) {
       const summaries = resultsForControl.map(r => r.summary).filter(Boolean);
       conciseFinding = summaries.join(' ').substring(0, 500);
