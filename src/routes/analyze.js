@@ -603,6 +603,8 @@ router.get('/document-viewer/:analysisId', async (req, res) => {
       fileType = 'pdf';
     } else if (mimeType.includes('wordprocessingml') || mimeType.includes('docx')) {
       fileType = 'docx';
+    } else if (mimeType.includes('spreadsheetml') || mimeType.includes('ms-excel') || mimeType === 'text/csv') {
+      fileType = 'spreadsheet';
     }
 
     // 9. Return viewer response

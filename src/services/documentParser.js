@@ -79,48 +79,15 @@ function parseSpreadsheet(filePath) {
 
   for (const sheetName of workbook.SheetNames) {
     const sheet = workbook.Sheets[sheetName];
-    const jsonData = XLSX.utils.sheet_to_json(sheet, {
-      header: 1,
-      defval: '',
-      blankrows: false,
-    });
+    const csv = XLSX.utils.sheet_to_csv(sheet, { blankrows: false });
 
-    if (jsonData.length < 1) continue;
+    if (!csv.trim()) continue;
 
-    // Extract headers from first row
-    const headers = jsonData[0]
-      .map(h => String(h ?? '').trim())
-      .filter(h => h !== '');
-
-    if (headers.length === 0) continue;
-
-    // Build row objects
-    const rows = jsonData.slice(1)
-      .map(row => {
-        const obj = {};
-        headers.forEach((h, i) => {
-          obj[h] = (row[i] != null) ? String(row[i]).trim() : '';
-        });
-        return obj;
-      })
-      .filter(row => Object.values(row).some(v => v !== ''));
-
-    // Build text for this sheet
     let sheetText = '';
     if (workbook.SheetNames.length > 1) {
       sheetText += `\n=== SHEET: ${sheetName} ===\n`;
     }
-    sheetText += `Columns: ${headers.join(' | ')}\n`;
-    sheetText += `Rows: ${rows.length}\n\n`;
-
-    rows.forEach((row, i) => {
-      const fields = headers
-        .map(h => row[h] ? `${h}: ${row[h]}` : null)
-        .filter(Boolean)
-        .join(' | ');
-      sheetText += `Row ${i + 1}: ${fields}\n`;
-    });
-
+    sheetText += csv;
     textParts.push(sheetText);
   }
 
@@ -254,10 +221,26 @@ async function parseDocumentForViewer(filePath, mimeType) {
       // html stays null — frontend uses react-pdf for real PDF rendering
       text = await parsePdf(filePath);
       break;
-    case 'spreadsheet':
-      // Convert spreadsheet to plain text for viewer display
-      text = parseSpreadsheet(filePath);
+    case 'spreadsheet': {
+      // Generate both HTML table and CSV text for the viewer
+      const workbook = XLSX.readFile(filePath, { type: 'file', cellDates: true, raw: false });
+      const htmlParts = [];
+      const textParts = [];
+
+      for (const sheetName of workbook.SheetNames) {
+        const sheet = workbook.Sheets[sheetName];
+        if (workbook.SheetNames.length > 1) {
+          htmlParts.push(`<h3>Sheet: ${sheetName}</h3>`);
+          textParts.push(`\n=== SHEET: ${sheetName} ===`);
+        }
+        htmlParts.push(XLSX.utils.sheet_to_html(sheet));
+        textParts.push(XLSX.utils.sheet_to_csv(sheet, { blankrows: false }));
+      }
+
+      html = htmlParts.join('\n');
+      text = textParts.join('\n');
       break;
+    }
     case 'text':
       // html stays null — frontend renders plain text directly
       text = await parseText(filePath);
