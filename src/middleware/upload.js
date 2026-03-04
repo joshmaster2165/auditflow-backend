@@ -3,7 +3,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
 
 // Storage: write to /tmp with unique filenames
 const storage = multer.diskStorage({
