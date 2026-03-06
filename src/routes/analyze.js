@@ -9,6 +9,7 @@ const { analyzeEvidence, analyzeImageEvidence, analyzeScannedPdfEvidence, normal
 const { generateDiff, generateHtmlExport } = require('../services/diffGenerator');
 const { buildRequirementText, computeGroupAggregate, fetchCustomInstructions, findChildControls, runGroupAnalysis, runGroupAnalysisByIds } = require('../services/groupAnalysis');
 const { createJobStore } = require('../utils/analysisHelpers');
+const { uploadEvidenceToVectorStore } = require('../services/lighthouseAgent');
 
 // ── Constants ──
 const MAX_COMBINED_TEXT_CHARS = 400000;
@@ -196,6 +197,13 @@ router.post('/evidence/:evidenceId', async (req, res) => {
     }
 
     console.log(`✅ Analysis saved: ${savedAnalysis.id}`);
+
+    // 8a. Sync evidence to Lighthouse vector store (non-blocking)
+    if (!evidence.openai_file_id) {
+      uploadEvidenceToVectorStore(evidence).catch(err => {
+        console.warn(`⚠️ Background vector store upload failed: ${err.message}`);
+      });
+    }
 
     // 8. Return analysis response
     res.json({

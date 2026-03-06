@@ -6,6 +6,7 @@ const analyzeRoutes = require('./routes/analyze');
 const frameworkRoutes = require('./routes/framework');
 const crosswalkRoutes = require('./routes/crosswalk');
 const reportRoutes = require('./routes/report');
+const lighthouseRoutes = require('./routes/lighthouse');
 const { testConnection } = require('./utils/supabase');
 
 // ── Validate required environment variables ──
@@ -68,6 +69,7 @@ app.use('/api/analyze', analyzeRoutes);
 app.use('/api/framework', frameworkRoutes);
 app.use('/api/crosswalk', crosswalkRoutes);
 app.use('/api/report', reportRoutes);
+app.use('/api/lighthouse', lighthouseRoutes);
 
 // Global error handler (includes multer errors)
 app.use((err, req, res, next) => {
@@ -118,7 +120,8 @@ async function start() {
     console.log(`🔗 Health check: http://localhost:${PORT}/health`);
     console.log(`📡 Analyze API: http://localhost:${PORT}/api/analyze`);
     console.log(`📡 Framework API: http://localhost:${PORT}/api/framework`);
-    console.log(`📡 Crosswalk API: http://localhost:${PORT}/api/crosswalk\n`);
+    console.log(`📡 Crosswalk API: http://localhost:${PORT}/api/crosswalk`);
+    console.log(`🔦 Lighthouse API: http://localhost:${PORT}/api/lighthouse\n`);
   });
 
   // Graceful shutdown
