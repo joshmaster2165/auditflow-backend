@@ -16,6 +16,12 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
+// Admin client bypasses RLS — used for backend-to-backend queries (e.g. Lighthouse agent)
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supabaseAdmin = supabaseServiceRoleKey
+  ? createClient(supabaseUrl, supabaseServiceRoleKey)
+  : supabase; // fallback to anon if no service role key set
+
 async function testConnection() {
   try {
     console.log('🔌 Testing Supabase connection...');
@@ -129,6 +135,7 @@ async function getSignedUrl(filePath, expiresIn = 300) {
 
 module.exports = {
   supabase,
+  supabaseAdmin,
   testConnection,
   downloadFile,
   cleanupFile,

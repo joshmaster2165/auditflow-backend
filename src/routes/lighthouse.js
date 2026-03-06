@@ -1,9 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { supabase } = require('../utils/supabase');
+const { supabaseAdmin } = require('../utils/supabase');
 const {
   getOrCreateVectorStore,
   uploadEvidenceToVectorStore,
+  getProjectControlIds,
   streamChat,
 } = require('../services/lighthouseAgent');
 
@@ -11,7 +12,7 @@ const {
 async function fetchCustomInstructions(projectId) {
   if (!projectId) return null;
   try {
-    const { data } = await supabase
+    const { data } = await supabaseAdmin
       .from('projects')
       .select('custom_instructions')
       .eq('id', projectId)
@@ -59,7 +60,7 @@ router.post('/:projectId/chat', async (req, res) => {
     let lastResponseId = null;
 
     if (threadId) {
-      const { data } = await supabase
+      const { data } = await supabaseAdmin
         .from('lighthouse_threads')
         .select('openai_response_id')
         .eq('id', threadId)
@@ -94,7 +95,7 @@ router.post('/:projectId/chat', async (req, res) => {
 
     if (threadId) {
       // Update existing thread
-      await supabase
+      await supabaseAdmin
         .from('lighthouse_threads')
         .update({
           openai_response_id: responseId,
@@ -107,7 +108,7 @@ router.post('/:projectId/chat', async (req, res) => {
       // Create new thread — use first ~60 chars of message as title
       const title = message.trim().substring(0, 60) + (message.length > 60 ? '...' : '');
 
-      const { data: newThread } = await supabase
+      const { data: newThread } = await supabaseAdmin
         .from('lighthouse_threads')
         .insert({
           project_id: projectId,
@@ -140,7 +141,7 @@ router.post('/:projectId/chat', async (req, res) => {
 // ──────────────────────────────────────────────────────
 router.get('/:projectId/threads', async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('lighthouse_threads')
       .select('id, title, created_at, updated_at')
       .eq('project_id', req.params.projectId)
@@ -168,7 +169,7 @@ router.get('/:projectId/threads/:threadId/messages', async (req, res) => {
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     // 1. Fetch the thread to get the last response ID
-    const { data: thread } = await supabase
+    const { data: thread } = await supabaseAdmin
       .from('lighthouse_threads')
       .select('openai_response_id')
       .eq('id', threadId)
@@ -227,7 +228,7 @@ router.delete('/:projectId/threads/:threadId', async (req, res) => {
   try {
     const { threadId, projectId } = req.params;
 
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from('lighthouse_threads')
       .delete()
       .eq('id', threadId)
@@ -252,12 +253,25 @@ router.post('/:projectId/sync', async (req, res) => {
   try {
     const { projectId } = req.params;
 
-    // Fetch all evidence without an openai_file_id
-    const { data: unsyncedEvidence, error } = await supabase
+    // Fetch all evidence without an openai_file_id — direct project_id first
+    let { data: unsyncedEvidence, error } = await supabaseAdmin
       .from('evidence')
       .select('*')
       .eq('project_id', projectId)
       .is('openai_file_id', null);
+
+    // Fallback: query through project → framework → controls chain
+    if (!unsyncedEvidence || unsyncedEvidence.length === 0) {
+      console.log(`📚 Sync: direct project_id query returned 0 — trying control-based fallback`);
+      const controlIds = await getProjectControlIds(projectId);
+      if (controlIds.length > 0) {
+        ({ data: unsyncedEvidence, error } = await supabaseAdmin
+          .from('evidence')
+          .select('*')
+          .in('control_id', controlIds)
+          .is('openai_file_id', null));
+      }
+    }
 
     if (error) {
       return res.status(500).json({ error: 'Failed to fetch evidence', details: error.message });

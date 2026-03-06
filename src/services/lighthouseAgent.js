@@ -1,6 +1,6 @@
 const OpenAI = require('openai');
 const fs = require('fs');
-const { supabase, downloadFile, cleanupFile } = require('../utils/supabase');
+const { supabase, supabaseAdmin, downloadFile, cleanupFile } = require('../utils/supabase');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -101,6 +101,38 @@ const FUNCTION_TOOLS = [
 ];
 
 // ═══════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════
+
+/**
+ * Resolve a project ID to all its control IDs through the relationship chain:
+ * projects.framework_id → controls.framework_id → control IDs
+ *
+ * Used as fallback when direct project_id queries return 0 results.
+ */
+async function getProjectControlIds(projectId) {
+  const { data: project } = await supabaseAdmin
+    .from('projects')
+    .select('framework_id')
+    .eq('id', projectId)
+    .single();
+
+  if (!project?.framework_id) {
+    console.log(`📚 getProjectControlIds: no framework_id for project ${projectId}`);
+    return [];
+  }
+
+  const { data: controls } = await supabaseAdmin
+    .from('controls')
+    .select('id')
+    .eq('framework_id', project.framework_id);
+
+  const ids = (controls || []).map(c => c.id);
+  console.log(`📚 getProjectControlIds: project=${projectId}, framework=${project.framework_id}, controls=${ids.length}`);
+  return ids;
+}
+
+// ═══════════════════════════════════════════════════════
 // Vector Store Lifecycle
 // ═══════════════════════════════════════════════════════
 
@@ -110,7 +142,7 @@ const FUNCTION_TOOLS = [
  */
 async function getOrCreateVectorStore(projectId) {
   // 1. Check if project already has a vector store
-  const { data: project } = await supabase
+  const { data: project } = await supabaseAdmin
     .from('projects')
     .select('openai_vector_store_id, name')
     .eq('id', projectId)
@@ -127,7 +159,7 @@ async function getOrCreateVectorStore(projectId) {
   });
 
   // 3. Persist to DB
-  await supabase
+  await supabaseAdmin
     .from('projects')
     .update({ openai_vector_store_id: vectorStore.id })
     .eq('id', projectId);
@@ -168,7 +200,7 @@ async function uploadEvidenceToVectorStore(evidenceRecord) {
     });
 
     // Store the openai_file_id on the evidence record
-    await supabase
+    await supabaseAdmin
       .from('evidence')
       .update({ openai_file_id: file.id })
       .eq('id', id);
@@ -191,7 +223,7 @@ async function removeEvidenceFromVectorStore(evidenceRecord) {
     const { openai_file_id, project_id } = evidenceRecord;
     if (!openai_file_id) return;
 
-    const { data: project } = await supabase
+    const { data: project } = await supabaseAdmin
       .from('projects')
       .select('openai_vector_store_id')
       .eq('id', project_id)
@@ -226,11 +258,27 @@ async function executeFunctionCall(name, args) {
   switch (name) {
     case 'get_project_summary': {
       const { project_id } = args;
-      const { data: analyses } = await supabase
+      console.log(`📚 get_project_summary: project_id=${project_id}`);
+
+      // Try direct project_id first, fallback to control-based query
+      let { data: analyses } = await supabaseAdmin
         .from('analysis_results')
         .select('status, compliance_percentage, confidence_score')
         .eq('project_id', project_id)
         .not('status', 'eq', 'error');
+
+      // Fallback: query through project → framework → controls
+      if (!analyses || analyses.length === 0) {
+        console.log(`📚 get_project_summary: direct query returned 0 — trying control-based fallback`);
+        const controlIds = await getProjectControlIds(project_id);
+        if (controlIds.length > 0) {
+          ({ data: analyses } = await supabaseAdmin
+            .from('analysis_results')
+            .select('status, compliance_percentage, confidence_score')
+            .in('control_id', controlIds)
+            .not('status', 'eq', 'error'));
+        }
+      }
 
       const total = analyses?.length || 0;
       const compliant = analyses?.filter(a => a.status === 'compliant').length || 0;
@@ -240,11 +288,23 @@ async function executeFunctionCall(name, args) {
         ? Math.round(analyses.reduce((sum, a) => sum + (parseFloat(a.compliance_percentage) || 0), 0) / total)
         : 0;
 
-      // Also count evidence and controls
-      const { count: evidenceCount } = await supabase
+      // Count evidence — direct first, fallback to control-based
+      let { count: evidenceCount } = await supabaseAdmin
         .from('evidence')
         .select('id', { count: 'exact', head: true })
         .eq('project_id', project_id);
+
+      if (!evidenceCount || evidenceCount === 0) {
+        const controlIds = await getProjectControlIds(project_id);
+        if (controlIds.length > 0) {
+          ({ count: evidenceCount } = await supabaseAdmin
+            .from('evidence')
+            .select('id', { count: 'exact', head: true })
+            .in('control_id', controlIds));
+        }
+      }
+
+      console.log(`📚 get_project_summary: analyses=${total}, evidence=${evidenceCount || 0}`);
 
       return JSON.stringify({
         total_analyses: total,
@@ -259,28 +319,51 @@ async function executeFunctionCall(name, args) {
 
     case 'get_control_analysis': {
       const { project_id, control_number } = args;
+      console.log(`📚 get_control_analysis: project_id=${project_id}, control=${control_number}`);
 
-      // Find control by number
-      const { data: controls } = await supabase
+      // Scope control search to this project's framework
+      const controlIds = await getProjectControlIds(project_id);
+
+      let controlQuery = supabaseAdmin
         .from('controls')
         .select('id, control_number, title, description, category')
         .ilike('control_number', control_number);
+
+      // If we found the project's controls, scope to them
+      if (controlIds.length > 0) {
+        controlQuery = controlQuery.in('id', controlIds);
+      }
+
+      const { data: controls } = await controlQuery;
 
       if (!controls || controls.length === 0) {
         return JSON.stringify({ error: `Control "${control_number}" not found` });
       }
 
-      const controlIds = controls.map(c => c.id);
+      const matchedControlIds = controls.map(c => c.id);
 
-      // Get latest analyses for this control
-      const { data: analyses } = await supabase
+      // Get analyses — try direct project_id first, fallback to control-based
+      let { data: analyses } = await supabaseAdmin
         .from('analysis_results')
         .select('status, compliance_percentage, confidence_score, summary, recommendations, findings, analyzed_at, evidence:evidence_id (file_name)')
-        .in('control_id', controlIds)
+        .in('control_id', matchedControlIds)
         .eq('project_id', project_id)
         .not('status', 'eq', 'error')
         .order('analyzed_at', { ascending: false })
         .limit(10);
+
+      // Fallback: without project_id filter (already scoped by control IDs within the project)
+      if (!analyses || analyses.length === 0) {
+        ({ data: analyses } = await supabaseAdmin
+          .from('analysis_results')
+          .select('status, compliance_percentage, confidence_score, summary, recommendations, findings, analyzed_at, evidence:evidence_id (file_name)')
+          .in('control_id', matchedControlIds)
+          .not('status', 'eq', 'error')
+          .order('analyzed_at', { ascending: false })
+          .limit(10));
+      }
+
+      console.log(`📚 get_control_analysis: found ${analyses?.length || 0} analyses`);
 
       return JSON.stringify({
         control: controls[0],
@@ -291,11 +374,29 @@ async function executeFunctionCall(name, args) {
 
     case 'get_evidence_list': {
       const { project_id } = args;
-      const { data } = await supabase
+      console.log(`📚 get_evidence_list: project_id=${project_id}`);
+
+      // Primary: direct project_id query
+      let { data } = await supabaseAdmin
         .from('evidence')
         .select('id, file_name, file_type, control_id, created_at, controls:control_id (title, control_number)')
         .eq('project_id', project_id)
         .order('created_at', { ascending: false });
+
+      // Fallback: query through project → framework → controls chain
+      if (!data || data.length === 0) {
+        console.log(`📚 get_evidence_list: direct query returned 0 — trying control-based fallback`);
+        const controlIds = await getProjectControlIds(project_id);
+        if (controlIds.length > 0) {
+          ({ data } = await supabaseAdmin
+            .from('evidence')
+            .select('id, file_name, file_type, control_id, created_at, controls:control_id (title, control_number)')
+            .in('control_id', controlIds)
+            .order('created_at', { ascending: false }));
+        }
+      }
+
+      console.log(`📚 get_evidence_list: found ${data?.length || 0} files`);
 
       return JSON.stringify({
         evidence_files: data || [],
@@ -305,8 +406,10 @@ async function executeFunctionCall(name, args) {
 
     case 'search_analysis_results': {
       const { project_id, query, status_filter } = args;
+      console.log(`📚 search_analysis_results: project_id=${project_id}, query="${query}"`);
 
-      let dbQuery = supabase
+      // Primary: direct project_id query
+      let dbQuery = supabaseAdmin
         .from('analysis_results')
         .select('summary, status, compliance_percentage, recommendations, controls:control_id (title, control_number), evidence:evidence_id (file_name)')
         .eq('project_id', project_id)
@@ -316,7 +419,26 @@ async function executeFunctionCall(name, args) {
         dbQuery = dbQuery.eq('status', status_filter);
       }
 
-      const { data } = await dbQuery.order('analyzed_at', { ascending: false });
+      let { data } = await dbQuery.order('analyzed_at', { ascending: false });
+
+      // Fallback: query through project → framework → controls
+      if (!data || data.length === 0) {
+        console.log(`📚 search_analysis_results: direct query returned 0 — trying control-based fallback`);
+        const controlIds = await getProjectControlIds(project_id);
+        if (controlIds.length > 0) {
+          let fallbackQuery = supabaseAdmin
+            .from('analysis_results')
+            .select('summary, status, compliance_percentage, recommendations, controls:control_id (title, control_number), evidence:evidence_id (file_name)')
+            .in('control_id', controlIds)
+            .not('status', 'eq', 'error');
+
+          if (status_filter && status_filter !== 'all') {
+            fallbackQuery = fallbackQuery.eq('status', status_filter);
+          }
+
+          ({ data } = await fallbackQuery.order('analyzed_at', { ascending: false }));
+        }
+      }
 
       // Text search filtering on summary and recommendations
       const queryLower = query.toLowerCase();
@@ -324,6 +446,8 @@ async function executeFunctionCall(name, args) {
         const searchText = `${r.summary || ''} ${JSON.stringify(r.recommendations || [])}`.toLowerCase();
         return searchText.includes(queryLower);
       });
+
+      console.log(`📚 search_analysis_results: ${data?.length || 0} total, ${filtered.length} matched query`);
 
       return JSON.stringify({
         results: filtered.slice(0, 20),
@@ -454,5 +578,6 @@ module.exports = {
   getOrCreateVectorStore,
   uploadEvidenceToVectorStore,
   removeEvidenceFromVectorStore,
+  getProjectControlIds,
   streamChat,
 };
