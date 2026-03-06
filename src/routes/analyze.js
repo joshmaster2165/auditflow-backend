@@ -1510,7 +1510,7 @@ router.post('/consolidate-control/:controlId', async (req, res) => {
 
     console.log(`📊 Found ${dedupedResults.length} unique document analyses to consolidate for control ${control.control_number}`);
 
-    // 4. Build condensed input for GPT
+    // 4. Build condensed input for GPT (includes requirements_breakdown for union-based scoring)
     const condensed = dedupedResults.map(r => ({
       evidence_name: r.evidence?.file_name || 'Unknown document',
       status: r.status,
@@ -1518,6 +1518,12 @@ router.post('/consolidate-control/:controlId', async (req, res) => {
       summary: r.summary || '',
       critical_gaps: r.findings?.critical_gaps || [],
       recommendations: r.recommendations || [],
+      requirements_breakdown: (r.findings?.requirements_breakdown || []).map(req => ({
+        requirement_id: req.requirement_id,
+        requirement_text: req.requirement_text,
+        status: req.status,
+        gap_description: req.gap_description || null,
+      })),
     }));
 
     // 5. Call GPT per-control consolidation
@@ -1728,7 +1734,7 @@ router.post('/consolidate/:parentControlId', async (req, res) => {
 
     console.log(`📊 Found ${dedupedResults.length} unique analyses to consolidate`);
 
-    // 5. Build condensed input for GPT
+    // 5. Build condensed input for GPT (includes requirements_breakdown for union-based scoring)
     const condensed = dedupedResults.map(r => ({
       control_number: r.control?.control_number || 'N/A',
       control_title: r.control?.title || 'Untitled',
@@ -1738,6 +1744,12 @@ router.post('/consolidate/:parentControlId', async (req, res) => {
       summary: r.summary || '',
       critical_gaps: r.findings?.critical_gaps || [],
       recommendations: r.recommendations || [],
+      requirements_breakdown: (r.findings?.requirements_breakdown || []).map(req => ({
+        requirement_id: req.requirement_id,
+        requirement_text: req.requirement_text,
+        status: req.status,
+        gap_description: req.gap_description || null,
+      })),
     }));
 
     // 6. Call GPT consolidation

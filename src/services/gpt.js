@@ -1058,22 +1058,37 @@ async function enhanceFrameworkControls(controls, context = {}) {
 // Consolidated Analysis — unify M×N evidence results into one report
 // ─────────────────────────────────────────────────────────────
 
-const CONSOLIDATION_SYSTEM_PROMPT = `You are a senior compliance auditor producing a consolidated analysis report. You will receive individual evidence-vs-control analysis results from multiple documents and controls.
+const CONSOLIDATION_SYSTEM_PROMPT = `You are a senior compliance auditor producing a consolidated analysis report. You will receive individual evidence-vs-control analysis results from multiple documents and controls. Each result includes a requirements_breakdown showing which sub-requirements each document addresses.
 
-Your job is to synthesize ALL individual analyses into ONE unified report that:
-1. Provides an overall compliance status and percentage across all controls and evidence
+## Scoring Algorithm — UNION-BASED (CRITICAL)
+You MUST use UNION-BASED scoring, NOT averaging.
+
+### Per-Control Scoring (for per_control_summary):
+For each control that has multiple evidence documents:
+1. Enumerate all unique sub-requirements from the requirements_breakdown arrays.
+2. For each sub-requirement, take the BEST status across all documents for that control ("met" > "partial" > "missing"). If at least one document marks it "met", it is "met".
+3. Calculate the control's compliance_percentage as: (count of "met" + 0.5 * count of "partial") / total unique sub-requirements * 100.
+4. MONOTONIC INCREASE: The per-control score MUST be >= the max individual score for that control. Adding more evidence NEVER decreases a score.
+
+### Overall Scoring:
+5. The overall_compliance_percentage is the AVERAGE of the per-control compliance percentages (since different controls are independent requirements, averaging across controls is correct).
+6. A gap should only appear in consolidated_gaps if NO evidence addresses it for that control.
+
+## Your Job
+Synthesize ALL individual analyses into ONE unified report that:
+1. Provides an overall compliance status and percentage using the union-based algorithm above
 2. Summarizes key findings, citing specific document names as references
 3. Lists which documents contribute evidence to which controls
-4. Identifies gaps that persist across all available evidence
+4. Identifies gaps that persist across all available evidence (only if NO document addresses them)
 5. Provides prioritized, actionable recommendations
 
-Rules:
+## Rules
 - Always reference documents by their exact filename
 - If multiple documents address the same control, note the strongest evidence source
 - Do NOT invent findings — only consolidate what the individual analyses found
 - Be concise but thorough
 - Use relaxed scoring thresholds: "compliant" when compliance >= 80%, "partial" when 40-79%, "non_compliant" when < 40%
-- When evidence from multiple documents covers a requirement through reasonable inference, score generously
+- When evidence from multiple documents covers a requirement through reasonable inference, score generously — complementary evidence should INCREASE the score
 - Use **bold** for key terms and _italic_ for document names in all free-text fields
 - Keep text concise: consolidated_summary (2-4 sentences), key_findings (1-2 sentences each), recommendations (1 sentence each)
 - Consolidate suggested evidence from individual analyses — list the top evidence items that would have the most impact across multiple controls
@@ -1100,8 +1115,19 @@ function buildConsolidationPrompt(analyses, controlContext) {
     if (a.recommendations && a.recommendations.length > 0) {
       prompt += `- Recommendations: ${a.recommendations.join('; ')}\n`;
     }
+    if (a.requirements_breakdown && a.requirements_breakdown.length > 0) {
+      prompt += `- Sub-requirements:\n`;
+      for (const req of a.requirements_breakdown) {
+        prompt += `  - [${(req.status || 'unknown').toUpperCase()}] ${req.requirement_id || '?'}: ${req.requirement_text || 'N/A'}`;
+        if (req.gap_description) prompt += ` (Gap: ${req.gap_description})`;
+        prompt += `\n`;
+      }
+    }
     prompt += `\n`;
   }
+
+  prompt += `## Union Scoring Reminder
+For each control with multiple evidence documents, enumerate sub-requirements and take the BEST status across all documents. The per-control score must reflect the UNION of evidence coverage. Adding evidence should always increase or maintain each control's score.\n\n`;
 
   prompt += `## Return JSON with this exact structure:
 {
@@ -1116,7 +1142,7 @@ function buildConsolidationPrompt(analyses, controlContext) {
       "key_findings": "<1-2 sentence summary of what this document evidences>"
     }
   ],
-  "consolidated_gaps": ["<gap description referencing which controls are affected>"],
+  "consolidated_gaps": ["<gap description — only gaps that NO document addresses>"],
   "consolidated_recommendations": ["<actionable recommendation>"],
   "suggested_evidence": ["<specific document/evidence type that would strengthen compliance across assessed controls>"],
   "per_control_summary": [
@@ -1159,6 +1185,42 @@ async function consolidateAnalyses(analyses, controlContext) {
       throw new Error('GPT returned invalid JSON response during consolidation');
     }
 
+    // Safety net: enforce monotonic increase per-control in per_control_summary
+    if (result.per_control_summary && Array.isArray(result.per_control_summary)) {
+      for (const controlSummary of result.per_control_summary) {
+        const matchingAnalyses = analyses.filter(a => a.control_number === controlSummary.control_number);
+        const maxForControl = Math.max(...matchingAnalyses.map(a => a.compliance_percentage || 0), 0);
+        if ((controlSummary.compliance_percentage || 0) < maxForControl) {
+          console.warn(`⚠️ Safety net [${controlSummary.control_number}]: ${controlSummary.compliance_percentage}% -> ${maxForControl}%`);
+          controlSummary.compliance_percentage = maxForControl;
+          if (controlSummary.compliance_percentage >= 80) controlSummary.status = 'compliant';
+          else if (controlSummary.compliance_percentage >= 40) controlSummary.status = 'partial';
+          else controlSummary.status = 'non_compliant';
+        }
+      }
+
+      // Recompute overall as average of corrected per-control scores
+      const correctedAvg = Math.round(
+        result.per_control_summary.reduce((sum, c) => sum + (c.compliance_percentage || 0), 0) /
+        result.per_control_summary.length
+      );
+      if (correctedAvg > (result.overall_compliance_percentage || 0)) {
+        result.overall_compliance_percentage = correctedAvg;
+      }
+    }
+
+    // Overall floor: at minimum, the max individual analysis score
+    const overallMaxIndividual = Math.max(...analyses.map(a => a.compliance_percentage || 0));
+    if ((result.overall_compliance_percentage || 0) < overallMaxIndividual) {
+      console.warn(`⚠️ Safety net [overall]: GPT score ${result.overall_compliance_percentage}% < max individual ${overallMaxIndividual}%. Raising.`);
+      result.overall_compliance_percentage = overallMaxIndividual;
+    }
+
+    // Re-derive overall status from corrected percentage
+    if (result.overall_compliance_percentage >= 80) result.overall_status = 'compliant';
+    else if (result.overall_compliance_percentage >= 40) result.overall_status = 'partial';
+    else result.overall_status = 'non_compliant';
+
     console.log(`✅ Consolidation complete — overall: ${result.overall_status} (${result.overall_compliance_percentage}%)`);
 
     return {
@@ -1175,23 +1237,34 @@ async function consolidateAnalyses(analyses, controlContext) {
 
 // ── Per-Control Consolidation (multiple evidence docs → one control) ──
 
-const PER_CONTROL_CONSOLIDATION_SYSTEM_PROMPT = `You are a senior compliance auditor producing a per-control evidence consolidation report. You will receive individual analysis results from multiple evidence documents that were each analyzed against the SAME control requirement.
+const PER_CONTROL_CONSOLIDATION_SYSTEM_PROMPT = `You are a senior compliance auditor producing a per-control evidence consolidation report. You will receive individual analysis results from multiple evidence documents that were each analyzed against the SAME control requirement. Each result includes a requirements_breakdown showing which sub-requirements each document addresses.
 
-Your job is to synthesize ALL individual document analyses into ONE unified report that:
-1. Provides an overall compliance status and percentage for this single control based on all available evidence
+## Scoring Algorithm — UNION-BASED (CRITICAL)
+You MUST use UNION-BASED scoring, NOT averaging. Follow these steps:
+
+1. Enumerate all unique sub-requirements for this control (from the requirements_breakdown arrays across all documents).
+2. For each sub-requirement, check if ANY document satisfies it ("met"). If at least one document marks it "met", the consolidated status for that sub-requirement is "met". If the best status across all documents is "partial", use "partial". Only mark "missing" if NO document addresses it at all.
+3. Calculate the consolidated overall_compliance_percentage as:
+   (count of "met" sub-requirements + 0.5 * count of "partial") / total unique sub-requirements * 100, rounded to the nearest integer.
+4. MONOTONIC INCREASE RULE: The consolidated overall_compliance_percentage MUST be >= the MAXIMUM individual compliance_percentage from any single document. Adding evidence can NEVER decrease the score. If your calculation yields a lower number, use the maximum individual score as the floor.
+5. A gap should only appear in consolidated_gaps if NO document addresses it — if even one document partially addresses a gap, it is no longer a consolidated gap.
+
+## Your Job
+Synthesize ALL individual document analyses into ONE unified report that:
+1. Provides an overall compliance status and percentage using the union-based algorithm above
 2. Summarizes key findings, citing specific document names as references
 3. Assesses each document's relevance and contribution to demonstrating compliance
-4. Identifies gaps that persist even after considering all available evidence
-5. Provides prioritized, actionable recommendations to close remaining gaps
+4. Identifies gaps that persist even after considering ALL available evidence together
+5. Provides prioritized, actionable recommendations to close only the remaining gaps
 
-Rules:
+## Rules
 - Always reference documents by their exact filename
-- Assess each document's relevance: "high" if it directly addresses control requirements, "medium" if it partially or indirectly addresses them, "low" if it has minimal relevance
+- Assess each document's relevance: "high" if it directly addresses control requirements, "medium" if partially/indirectly, "low" if minimal relevance
 - If multiple documents address the same requirement, note the strongest evidence source
 - Do NOT invent findings — only consolidate what the individual analyses found
 - Be concise but thorough
 - Use relaxed scoring thresholds: "compliant" when compliance >= 80%, "partial" when 40-79%, "non_compliant" when < 40%
-- When evidence from multiple documents covers a requirement through reasonable inference, score generously
+- When evidence from multiple documents covers a requirement through reasonable inference, score generously — complementary evidence should INCREASE the score
 - Use **bold** for key terms and _italic_ for document names in all free-text fields
 - Keep text concise: consolidated_summary (2-3 sentences), key_findings (1-2 paragraphs), recommendations (1 sentence each)
 
@@ -1216,8 +1289,19 @@ function buildPerControlConsolidationPrompt(analyses, controlContext) {
     if (a.recommendations && a.recommendations.length > 0) {
       prompt += `- Recommendations: ${a.recommendations.join('; ')}\n`;
     }
+    if (a.requirements_breakdown && a.requirements_breakdown.length > 0) {
+      prompt += `- Sub-requirements:\n`;
+      for (const req of a.requirements_breakdown) {
+        prompt += `  - [${(req.status || 'unknown').toUpperCase()}] ${req.requirement_id || '?'}: ${req.requirement_text || 'N/A'}`;
+        if (req.gap_description) prompt += ` (Gap: ${req.gap_description})`;
+        prompt += `\n`;
+      }
+    }
     prompt += `\n`;
   }
+
+  prompt += `## Union Scoring Reminder
+Before producing the final JSON, enumerate each unique sub-requirement across all documents and determine which documents satisfy it. The consolidated score must reflect the UNION of all evidence coverage — not the average of individual scores. Adding evidence should always increase or maintain the score.\n\n`;
 
   prompt += `## Return JSON with this exact structure:
 {
@@ -1231,7 +1315,7 @@ function buildPerControlConsolidationPrompt(analyses, controlContext) {
       "key_contribution": "<1 sentence describing what this document evidences for this control>"
     }
   ],
-  "consolidated_gaps": ["<gap description referencing what is still missing>"],
+  "consolidated_gaps": ["<gap description — only gaps that NO document addresses>"],
   "consolidated_recommendations": ["<actionable recommendation>"],
   "key_findings": "<paragraph summarizing the most important findings across all evidence>"
 }`;
@@ -1262,6 +1346,16 @@ async function consolidateControlAnalyses(analyses, controlContext) {
     } catch (parseErr) {
       console.error('❌ Failed to parse GPT per-control consolidation response as JSON');
       throw new Error('GPT returned invalid JSON response during per-control consolidation');
+    }
+
+    // Safety net: enforce monotonic increase — consolidated score must be >= max individual score
+    const maxIndividualScore = Math.max(...analyses.map(a => a.compliance_percentage || 0));
+    if ((result.overall_compliance_percentage || 0) < maxIndividualScore) {
+      console.warn(`⚠️ Safety net [${controlContext.control_number}]: GPT score ${result.overall_compliance_percentage}% < max individual ${maxIndividualScore}%. Raising to floor.`);
+      result.overall_compliance_percentage = maxIndividualScore;
+      if (result.overall_compliance_percentage >= 80) result.overall_status = 'compliant';
+      else if (result.overall_compliance_percentage >= 40) result.overall_status = 'partial';
+      else result.overall_status = 'non_compliant';
     }
 
     console.log(`✅ Per-control consolidation complete — overall: ${result.overall_status} (${result.overall_compliance_percentage}%)`);
